@@ -23,8 +23,8 @@ public final class PinpointLocalizer implements Localizer {
      * Pinpoint 定位器的参数配置类
      */
     public static class Params {
-        public double parYTicks = 0.0; // 平行编码器的 y 位置（tick 单位）
-        public double perpXTicks = 0.0; // 垂直编码器的 x 位置（tick 单位）
+        public double parYTicks = 2460; // 平行编码器的 y 位置（tick 单位）
+        public double perpXTicks = -1970; // 垂直编码器的 x 位置（tick 单位）
     }
 
     /**
@@ -69,12 +69,11 @@ public final class PinpointLocalizer implements Localizer {
 
         // TODO: 如果需要，反转编码器方向
         initialParDirection = GoBildaPinpointDriver.EncoderDirection.FORWARD;
-        initialPerpDirection = GoBildaPinpointDriver.EncoderDirection.FORWARD;
+        initialPerpDirection = GoBildaPinpointDriver.EncoderDirection.REVERSED;
 
         driver.setEncoderDirections(initialParDirection, initialPerpDirection);
 
         driver.resetPosAndIMU();
-
         txWorldPinpoint = initialPose;
     }
 

@@ -78,39 +78,38 @@ public final class MecanumDrive {
                 RevHubOrientationOnRobot.UsbFacingDirection.FORWARD;
 
         // 驱动模型参数
-        public double inPerTick = 1; // 每个编码器 tick 对应的英寸数
-        public double lateralInPerTick = inPerTick; // 横向移动每个 tick 对应的英寸数
-        public double trackWidthTicks = 0; // 轮距（编码器 tick 单位）
+        public double inPerTick = 0.001999;
+        public double lateralInPerTick = inPerTick;
+        public double trackWidthTicks = 5765.723859478465;
 
         // 电机前馈参数（tick 单位）
-        public double kS = 0; // 静态摩擦力补偿
-        public double kV = 0; // 速度比例系数
-        public double kA = 0; // 加速度比例系数
+        public double kS = 1.2019792244145228;
+        public double kV = 0.00035261972751626935666666666666667;
+        public double kA = 0.00007;
 
         // 路径规划参数（英寸单位）
-        public double maxWheelVel = 50; // 最大轮速
-        public double minProfileAccel = -30; // 最小加速度
-        public double maxProfileAccel = 50; // 最大加速度
+        public double maxWheelVel = 50;
+        public double minProfileAccel = -30;
+        public double maxProfileAccel = 50;
 
         // 转向规划参数（弧度单位）
-        public double maxAngVel = Math.PI; // 最大角速度（与路径共享）
-        public double maxAngAccel = Math.PI; // 最大角加速度
+        public double maxAngVel = Math.PI;
+        public double maxAngAccel = Math.PI;
 
         // 路径控制器增益
-        public double axialGain = 0.0; // 轴向控制增益
-        public double lateralGain = 0.0; // 横向控制增益
-        public double headingGain = 0.0; // 航向控制增益（与转向共享）
+        public double axialGain = 2;
+        public double lateralGain = 3;
+        public double headingGain = 2;
 
-        public double axialVelGain = 0.0; // 轴向速度控制增益
-        public double lateralVelGain = 0.0; // 横向速度控制增益
-        public double headingVelGain = 0.0; // 航向速度控制增益（与转向共享）
+        public double axialVelGain = 0.5;
+        public double lateralVelGain = 1;
+        public double headingVelGain = 1;
     }
 
     /**
      * 全局参数实例，可通过 FTC Dashboard 实时调整
      */
     public static Params PARAMS = new Params();
-
     /**
      * Mecanum 轮运动学模型
      */
@@ -357,6 +356,15 @@ public final class MecanumDrive {
         leftBack = hardwareMap.get(DcMotorEx.class, "bL");
         rightBack = hardwareMap.get(DcMotorEx.class, "bR");
         rightFront = hardwareMap.get(DcMotorEx.class, "fR");
+        // 显式设置所有电机方向，确保运动学模型与物理方向一致
+        // 标准配置：左侧 FORWARD，右侧 REVERSE
+        // 如果 X 前进时偏向某一侧，优先用 MecanumMotorDirectionDebugger 排查
+        // 哪个电机方向反了，对应改为 REVERSE/FORWARD
+        leftFront.setDirection(DcMotorSimple.Direction.FORWARD);
+        leftBack.setDirection(DcMotorSimple.Direction.FORWARD);
+        rightBack.setDirection(DcMotorSimple.Direction.REVERSE);
+        rightFront.setDirection(DcMotorSimple.Direction.REVERSE);
+
 
         // 设置电机零功率行为为制动
         leftFront.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
@@ -376,7 +384,7 @@ public final class MecanumDrive {
         voltageSensor = hardwareMap.voltageSensor.iterator().next();
 
         // 初始化定位器
-        localizer = new DriveLocalizer(pose);
+        localizer =  new WriteInstantlyLocalizer(hardwareMap, PARAMS.inPerTick, pose);
 
         // 记录参数
         FlightRecorder.write("MECANUM_PARAMS", PARAMS);
@@ -555,6 +563,8 @@ public final class MecanumDrive {
      */
     public final class TurnAction implements Action {
         /**
+         *
+         *
          * 时间转向
          */
         private final TimeTurn turn;
@@ -628,10 +638,10 @@ public final class MecanumDrive {
             ));
 
             // 设置电机功率
-            leftFront.setPower(feedforward.compute(wheelVels.leftFront) / voltage);
-            leftBack.setPower(feedforward.compute(wheelVels.leftBack) / voltage);
-            rightBack.setPower(feedforward.compute(wheelVels.rightBack) / voltage);
-            rightFront.setPower(feedforward.compute(wheelVels.rightFront) / voltage);
+            leftFront.setPower(leftFrontPower);
+            leftBack.setPower(leftBackPower);
+            rightBack.setPower(rightBackPower);
+            rightFront.setPower(rightFrontPower);
 
             // 绘制
             Canvas c = p.fieldOverlay();
