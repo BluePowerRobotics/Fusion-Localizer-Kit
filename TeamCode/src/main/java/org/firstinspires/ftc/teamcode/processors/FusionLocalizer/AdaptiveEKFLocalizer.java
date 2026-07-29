@@ -1,7 +1,9 @@
 package org.firstinspires.ftc.teamcode.processors.FusionLocalizer;
 
+import com.acmerobotics.dashboard.config.Config;
 import com.acmerobotics.roadrunner.Pose2d;
 import com.acmerobotics.roadrunner.PoseVelocity2d;
+import com.acmerobotics.roadrunner.Vector2d;
 import com.qualcomm.hardware.limelightvision.Limelight3A;
 import com.qualcomm.robotcore.hardware.IMU;
 import com.qualcomm.robotcore.hardware.HardwareMap;
@@ -10,6 +12,7 @@ import org.firstinspires.ftc.robotcore.external.navigation.AngleUnit;
 import org.firstinspires.ftc.robotcore.external.navigation.AngularVelocity;
 import org.ejml.simple.SimpleMatrix;
 
+import org.firstinspires.ftc.teamcode.RoadRunner.Localizer;
 import org.firstinspires.ftc.teamcode.RoadRunner.PinpointLocalizer;
 import org.firstinspires.ftc.teamcode.processors.VisionLocalizer.MT1Localizer;
 import org.firstinspires.ftc.teamcode.utility.filter.EKF.EKF;
@@ -30,7 +33,8 @@ import org.firstinspires.ftc.teamcode.utility.filter.EKF.EKF;
  *   <li><b>R 自适应</b>: MT1 各方向 stdDev → 各方向独立 R 矩阵</li>
  * </ul>
  */
-public class AdaptiveEKFLocalizer {
+@Config
+public class AdaptiveEKFLocalizer implements Localizer {
 
     private final EKF ekf;
     private final PinpointLocalizer pinpoint;
@@ -39,6 +43,9 @@ public class AdaptiveEKFLocalizer {
 
     // ---- 时间基准 ----
     private double lastTimestamp = 0;
+
+    /** 最近一次 Pinpoint 速度缓存 */
+    private PoseVelocity2d lastVel = new PoseVelocity2d(new Vector2d(0, 0), 0);
 
     // ---- Q 自适应: IMU 冲击检测 ----
     /** 上一帧 pitch 角速度 (rad/s) — 用于计算角加速度 */
@@ -49,32 +56,32 @@ public class AdaptiveEKFLocalizer {
     private double lastYawRate = 0;
 
     /** Q 基值 (in²/s) */
-    private double qBase = 0.002;
-    private double qBoostX = 1.0;
-    private double qBoostY = 1.0;
-    private double qBoostTheta = 1.0;
+    public static double qBase = 0.002;
+    public static double qBoostX = 1.0;
+    public static double qBoostY = 1.0;
+    public static double qBoostTheta = 1.0;
 
-    private static final double ANGULAR_ACCEL_THRESHOLD = 5.0;  // rad/s² (pitch/roll 角加速度阈值)
-    private static final double JERK_THRESHOLD = 4.0;           // rad/s² (yaw 角速度 jerk 阈值)
-    private static final double Q_BOOST_MAX = 10.0;
-    private static final double Q_DECAY = 0.85;
+    public static double ANGULAR_ACCEL_THRESHOLD = 5.0;  // rad/s² (pitch/roll 角加速度阈值)
+    public static double JERK_THRESHOLD = 4.0;           // rad/s² (yaw 角速度 jerk 阈值)
+    public static double Q_BOOST_MAX = 10.0;
+    public static double Q_DECAY = 0.85;
 
     // ---- R 自适应: MT1 stdDev ----
     /** 单位转换: 1 m = 39.3701 in */
-    private static final double M_TO_INCH = 39.37007874;
+    public static double M_TO_INCH = 39.37007874;
 
     /** stdDev 阈值 (英寸) — 对应原 0.05m / 0.15m */
-    private static final double STD_LOW_INCH = 2.0;
-    private static final double STD_HIGH_INCH = 6.0;
+    public static double STD_LOW_INCH = 2.0;
+    public static double STD_HIGH_INCH = 6.0;
 
     /** stdDev 阈值 (弧度) — 角度分量专用，对应 ≈2° / ≈10° */
-    private static final double STD_LOW_ANGLE = 0.035;   // rad (≈2°)
-    private static final double STD_HIGH_ANGLE = 0.175;  // rad (≈10°)
+    public static double STD_LOW_ANGLE = 0.035;   // rad (≈2°)
+    public static double STD_HIGH_ANGLE = 0.175;  // rad (≈10°)
 
-    private static final double R_MAX_SCALE = 20.0;
+    public static double R_MAX_SCALE = 20.0;
 
     /** R 基值缓存 (调试用) */
-    private double rBase = 0.01;
+    public static double rBase = 0.01;
 
     // ==================== 构造 ====================
 
@@ -110,33 +117,38 @@ public class AdaptiveEKFLocalizer {
      *   <li>EKF 预测</li>
      *   <li>Limelight 更新 → 自适应 R (3x3 矩阵) + EKF 更新</li>
      * </ol>
+     *
+     * @return 当前速度估计
      */
-    public void update() {
+    @Override
+    public PoseVelocity2d update() {
         double now = getNow();
         double dt = now - lastTimestamp;
         lastTimestamp = now;
 
         // ---- 1. Pinpoint 速度 ----
-        PoseVelocity2d vel = pinpoint.update();
+        lastVel = pinpoint.update();
 
         // ---- 2. IMU 加速度/角速度 → 自适应 Q 矩阵 ----
         ekf.setQ(adaptQ(dt));
 
         // ---- 3. EKF 预测 ----
-        ekf.predict(vel.linearVel.x, vel.linearVel.y, vel.angVel, now);
+        ekf.predict(lastVel.linearVel.x, lastVel.linearVel.y, lastVel.angVel, now);
 
         // ---- 4. MT1 视觉 → 自适应 R 矩阵 + EKF 更新 ----
         mt1.update();
         if (mt1.isValid()) {
             ekf.setR(adaptR());
-            double[] visionPose = mt1.getPose();          // {x_m, y_m, theta_rad} (米, 米, 弧度)
+            Pose2d visionPose = mt1.getPose();              // (米, 米, 弧度)
             ekf.update(
-                    visionPose[0] * M_TO_INCH,            // 米 → 英寸
-                    visionPose[1] * M_TO_INCH,            // 米 → 英寸
-                    visionPose[2],                        // 弧度不变
+                    visionPose.position.x * M_TO_INCH,      // 米 → 英寸
+                    visionPose.position.y * M_TO_INCH,      // 米 → 英寸
+                    visionPose.heading.toDouble(),          // 弧度不变
                     mt1.getTimestamp()
             );
         }
+
+        return lastVel;
     }
 
     // ==================== 自适应 Q (SimpleMatrix 输出) ====================
@@ -280,9 +292,26 @@ public class AdaptiveEKFLocalizer {
         }
     }
 
+    // ==================== Localizer 接口 ====================
+
+    /** 设置定位器位姿。 */
+    @Override
+    public void setPose(Pose2d pose) {
+        ekf.reset(pose.position.x, pose.position.y, pose.heading.toDouble());
+        pinpoint.setPose(pose);
+        lastTimestamp = getNow();
+        qBoostX = 1.0;
+        qBoostY = 1.0;
+        qBoostTheta = 1.0;
+        lastPitchRate = 0;
+        lastRollRate = 0;
+        lastYawRate = 0;
+    }
+
     // ==================== 输出 ====================
 
     /** @return 融合后的位姿 {x, y, heading} (英寸, 英寸, 弧度) */
+    @Override
     public Pose2d getPose() {
         double[] pose = ekf.getPose();
         return new Pose2d(pose[0], pose[1], pose[2]);

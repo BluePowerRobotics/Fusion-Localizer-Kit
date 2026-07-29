@@ -337,7 +337,57 @@ public final class MecanumDrive {
     }
 
     /**
-     * 构造函数
+     * 构造函数 — 使用外部 Localizer（如 EKFLocalizer / AdaptiveEKFLocalizer）。
+     * @param hardwareMap 硬件映射
+     * @param localizer   外部定位器实例
+     */
+    public MecanumDrive(HardwareMap hardwareMap, Localizer localizer) {
+        // 检查 Lynx 模块固件是否最新
+        LynxFirmware.throwIfModulesAreOutdated(hardwareMap);
+
+        // 设置所有 Lynx 模块的缓存模式
+        for (LynxModule module : hardwareMap.getAll(LynxModule.class)) {
+            module.setBulkCachingMode(LynxModule.BulkCachingMode.AUTO);
+        }
+
+        // TODO: 确保你的配置中有这些名称的电机（或修改它们）
+        //   参考 https://ftc-docs.firstinspires.org/en/latest/hardware_and_software_configuration/configuring/index.html
+        leftFront = hardwareMap.get(DcMotorEx.class, "fL");
+        leftBack = hardwareMap.get(DcMotorEx.class, "bL");
+        rightBack = hardwareMap.get(DcMotorEx.class, "bR");
+        rightFront = hardwareMap.get(DcMotorEx.class, "fR");
+        // 显式设置所有电机方向，确保运动学模型与物理方向一致
+        // 标准配置：左侧 FORWARD，右侧 REVERSE
+        // 如果 X 前进时偏向某一侧，优先用 MecanumMotorDirectionDebugger 排查
+        // 哪个电机方向反了，对应改为 REVERSE/FORWARD
+        leftFront.setDirection(DcMotorSimple.Direction.FORWARD);
+        leftBack.setDirection(DcMotorSimple.Direction.FORWARD);
+        rightBack.setDirection(DcMotorSimple.Direction.REVERSE);
+        rightFront.setDirection(DcMotorSimple.Direction.REVERSE);
+
+        // 设置电机零功率行为为制动
+        leftFront.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
+        leftBack.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
+        rightBack.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
+        rightFront.setZeroPowerBehavior(DcMotor.ZeroPowerBehavior.BRAKE);
+
+        // TODO: 确保你的配置中有这个名称的 IMU（可以是 BNO 或 BHI）
+        //   参考 https://ftc-docs.firstinspires.org/en/latest/hardware_and_software_configuration/configuring/index.html
+        lazyImu = new LazyHardwareMapImu(hardwareMap, "imu", new RevHubOrientationOnRobot(
+                PARAMS.logoFacingDirection, PARAMS.usbFacingDirection));
+
+        // 获取电压传感器
+        voltageSensor = hardwareMap.voltageSensor.iterator().next();
+
+        // 使用外部传入的 Localizer
+        this.localizer = localizer;
+
+        // 记录参数
+        FlightRecorder.write("MECANUM_PARAMS", PARAMS);
+    }
+
+    /**
+     * 构造函数 — 使用内置轮式里程计定位器（向后兼容）。
      * @param hardwareMap 硬件映射
      * @param pose 初始位姿
      */

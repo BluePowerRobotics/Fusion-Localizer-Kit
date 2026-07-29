@@ -1,10 +1,14 @@
 package org.firstinspires.ftc.teamcode.processors.VisionLocalizer;
 
+import com.acmerobotics.roadrunner.Pose2d;
+import com.acmerobotics.roadrunner.PoseVelocity2d;
+import com.acmerobotics.roadrunner.Vector2d;
 import com.qualcomm.hardware.limelightvision.LLResult;
 import com.qualcomm.hardware.limelightvision.LLResultTypes;
 import com.qualcomm.hardware.limelightvision.Limelight3A;
 
 import org.firstinspires.ftc.robotcore.external.navigation.Pose3D;
+import org.firstinspires.ftc.teamcode.RoadRunner.Localizer;
 
 import java.util.List;
 
@@ -26,7 +30,7 @@ import java.util.List;
  *   }
  * }</pre>
  */
-public class MT1Localizer {
+public class MT1Localizer implements Localizer {
 
     private final Limelight3A limelight;
 
@@ -70,19 +74,22 @@ public class MT1Localizer {
     /**
      * 从 Limelight 拉取最新 MegaTag1 结果。
      * 应在每帧循环中调用。
+     *
+     * @return 零速度（视觉定位器无法提供速度）
      */
-    public void update() {
+    @Override
+    public PoseVelocity2d update() {
         latestResult = limelight.getLatestResult();
 
         if (latestResult == null || !latestResult.isValid()) {
             valid = false;
-            return;
+            return new PoseVelocity2d(new Vector2d(0, 0), 0);
         }
 
         botpose = latestResult.getBotpose();
         if (botpose == null) {
             valid = false;
-            return;
+            return new PoseVelocity2d(new Vector2d(0, 0), 0);
         }
 
         // 提取 MegaTag1 质量指标
@@ -107,22 +114,42 @@ public class MT1Localizer {
         }
 
         valid = true;
+        return new PoseVelocity2d(new Vector2d(0, 0), 0);
     }
 
-    // ==================== 位姿输出 ====================
+    // ==================== 位姿输出 (Localizer 接口) ====================
 
     /**
-     * @return 全局位姿 {@code double[3] = {x, y, theta}} (米, 米, 弧度)
+     * @return 全局位姿 (米, 米, 弧度)
      *         坐标系: FTC 标准场地坐标系, 原点为场地中心
      */
-    public double[] getPose() {
+    @Override
+    public Pose2d getPose() {
+        if (!valid || botpose == null) {
+            return new Pose2d(0, 0, 0);
+        }
+        return new Pose2d(
+                botpose.getPosition().x,                        // 米
+                botpose.getPosition().y,                        // 米
+                Math.toRadians(botpose.getOrientation().getYaw()) // 度 → 弧度
+        );
+    }
+
+    /** 视觉定位器不支持设置位姿。 */
+    @Override
+    public void setPose(Pose2d pose) {
+        // no-op
+    }
+
+    /** @return 原始位姿数组 {x, y, theta} (米, 米, 弧度) */
+    public double[] getPoseArray() {
         if (!valid || botpose == null) {
             return new double[]{0, 0, 0};
         }
         return new double[]{
-                botpose.getPosition().x,                        // 米
-                botpose.getPosition().y,                        // 米
-                Math.toRadians(botpose.getOrientation().getYaw()) // 度 → 弧度
+                botpose.getPosition().x,
+                botpose.getPosition().y,
+                Math.toRadians(botpose.getOrientation().getYaw())
         };
     }
 
