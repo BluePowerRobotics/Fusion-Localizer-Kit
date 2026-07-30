@@ -1,6 +1,7 @@
 package org.firstinspires.ftc.teamcode.opmodes;
 
 import com.acmerobotics.dashboard.FtcDashboard;
+import com.acmerobotics.dashboard.config.Config;
 import com.acmerobotics.dashboard.telemetry.MultipleTelemetry;
 import com.acmerobotics.dashboard.telemetry.TelemetryPacket;
 import com.acmerobotics.roadrunner.Pose2d;
@@ -9,7 +10,6 @@ import com.acmerobotics.roadrunner.Vector2d;
 import com.qualcomm.hardware.limelightvision.Limelight3A;
 import com.qualcomm.robotcore.eventloop.opmode.LinearOpMode;
 import com.qualcomm.robotcore.eventloop.opmode.TeleOp;
-import com.qualcomm.robotcore.hardware.HardwareMap;
 
 import org.firstinspires.ftc.teamcode.RoadRunner.Drawing;
 import org.firstinspires.ftc.teamcode.RoadRunner.MecanumDrive;
@@ -19,17 +19,58 @@ import org.firstinspires.ftc.teamcode.processors.FusionLocalizer.EKFLocalizer;
 import org.firstinspires.ftc.teamcode.processors.VisionLocalizer.MT1Localizer;
 
 import java.util.LinkedList;
+import java.util.List;
 
 /**
- * 融合定位测试 OpMode —— 同时绘制 Pinpoint / MT1 / EKFLocalizer / AdaptiveEKFLocalizer 轨迹。
+ * 多定位器对比测试 OpMode。
  *
- * <p>使用手柄操控机器人，在 FTC Dashboard 上实时绘制四条定位轨迹。
- * 左摇杆控制平移，右摇杆 X 轴控制旋转。
+ * <p>使用手柄操控机器人，在 FTC Dashboard 上同时绘制
+ * {@link PinpointLocalizer}、{@link MT1Localizer}、{@link EKFLocalizer}、
+ * {@link AdaptiveEKFLocalizer} 的轨迹和位姿。
+ *
+ * <h3>误差测量</h3>
+ * <ol>
+ *   <li>在 FTC Dashboard 中设置 {@code testX / testY / testHeading} 为目标位姿</li>
+ *   <li>驾驶机器人到达 TestPose</li>
+ *   <li>按下手柄 A 键 → 记录所有定位器的位姿并计算误差</li>
+ *   <li>误差以 (Δx, Δy, Δθ°) 形式显示在 telemetry 中</li>
+ * </ol>
+ *
+ * <p>颜色对应:
+ * <ul>
+ *   <li>绿色 — PinpointLocalizer</li>
+ *   <li>橙色 — MT1Localizer (视觉)</li>
+ *   <li>粉色 — EKFLocalizer (固定 Q/R)</li>
+ *   <li>紫色 — AdaptiveEKFLocalizer</li>
+ *   <li>红色虚线 — TestPose (目标点)</li>
+ * </ul>
  */
-@TeleOp(name = "Fusion Localizer Test", group = "Fusion")
+@Config
+@TeleOp(name = "Fusion Test", group = "Fusion")
 public class FusionTestOpMode extends LinearOpMode {
 
-    private static final int MAX_HISTORY = 200;
+    private static final double IN_PER_TICK = 0.001999;
+
+    // ---- TestPose (可在 Dashboard 动态调整) ----
+    public static double testX = 63;
+    public static double testY = 60.7;
+    public static double testHeading = Math.PI/2;  // 弧度
+
+    // ---- 误差记录 ----
+    private boolean prevAPressed = false;
+    private boolean errorRecorded = false;
+
+    private double errPinpointX, errPinpointY, errPinpointTheta;
+    private double errMt1X,       errMt1Y,       errMt1Theta;
+    private double errEkfX,       errEkfY,       errEkfTheta;
+    private double errAdaptiveX,  errAdaptiveY,  errAdaptiveTheta;
+
+    // ---- 轨迹历史 (用于绘制) ----
+    private final List<Pose2d> pinpointHistory    = new LinkedList<>();
+    private final List<Pose2d> mt1History         = new LinkedList<>();
+    private final List<Pose2d> ekfHistory         = new LinkedList<>();
+    private final List<Pose2d> adaptiveHistory    = new LinkedList<>();
+    private static final int MAX_HISTORY = 80;
 
     @Override
     public void runOpMode() throws InterruptedException {
@@ -39,116 +80,224 @@ public class FusionTestOpMode extends LinearOpMode {
         Limelight3A limelight = hardwareMap.get(Limelight3A.class, "limelight");
         limelight.start();
 
-        // ---- 构建四个定位器 ----
         Pose2d initialPose = new Pose2d(0, 0, 0);
 
-        // 1. Pinpoint 原始定位
-        PinpointLocalizer pinpointLocalizer = new PinpointLocalizer(hardwareMap, 0.001999, initialPose);
+        // ---- 创建所有定位器 ----
+        PinpointLocalizer pinpoint = new PinpointLocalizer(hardwareMap, IN_PER_TICK, initialPose);
+        MT1Localizer mt1 = new MT1Localizer(limelight);
+        EKFLocalizer ekf = new EKFLocalizer(hardwareMap, limelight, initialPose);
+        AdaptiveEKFLocalizer adaptiveEkf = new AdaptiveEKFLocalizer(hardwareMap, limelight);
 
-        // 2. MT1 视觉定位
-        MT1Localizer mt1Localizer = new MT1Localizer(limelight);
-
-        // 3. EKF 融合定位 (非自适应)
-        EKFLocalizer ekfLocalizer = new EKFLocalizer(hardwareMap, limelight, initialPose);
-
-        // 4. Adaptive EKF 融合定位
-        AdaptiveEKFLocalizer adaptiveEKF = new AdaptiveEKFLocalizer(hardwareMap, limelight, "imu", initialPose);
-
-        // ---- 构建 MecanumDrive (使用 Pinpoint 作为底层定位器) ----
-        MecanumDrive drive = new MecanumDrive(hardwareMap, pinpointLocalizer);
-
-        // ---- 轨迹历史 ----
-        LinkedList<Pose2d> pinpointHistory = new LinkedList<>();
-        LinkedList<Pose2d> mt1History = new LinkedList<>();
-        LinkedList<Pose2d> ekfHistory = new LinkedList<>();
-        LinkedList<Pose2d> adaptiveEKFHistory = new LinkedList<>();
+        // ---- 创建驱动 ----
+        MecanumDrive drive = new MecanumDrive(hardwareMap, initialPose);
 
         waitForStart();
 
+        // ---- 主循环 ----
         while (opModeIsActive()) {
-            // ---- 手柄控制 ----
-            double forward = -gamepad1.left_stick_y;
-            double strafe   = -gamepad1.left_stick_x;
-            double turn     = -gamepad1.right_stick_x;
-
+            // === 手柄控制 ===
             drive.setDrivePowers(new PoseVelocity2d(
-                    new Vector2d(forward, strafe),
-                    turn
+                    new Vector2d(
+                            -gamepad1.left_stick_y,
+                            -gamepad1.left_stick_x
+                    ),
+                    -gamepad1.right_stick_x
             ));
 
-            // ---- 更新所有定位器 ----
-            pinpointLocalizer.update();
-            mt1Localizer.update();
-            ekfLocalizer.update();
-            adaptiveEKF.update();
+            // === 更新所有定位器 ===
+            drive.updatePoseEstimate();
+            pinpoint.update();
+            mt1.update();
+            ekf.update();
+            adaptiveEkf.update();
 
-            // ---- 记录轨迹 ----
-            addToHistory(pinpointHistory, pinpointLocalizer.getPose());
-            addToHistory(mt1History, mt1Localizer.getPose());
-            addToHistory(ekfHistory, ekfLocalizer.getPose());
-            addToHistory(adaptiveEKFHistory, adaptiveEKF.getPose());
+            // === 获取位姿 ===
+            Pose2d pinpointPose    = pinpoint.getPose();
+            Pose2d mt1Pose         = mt1.getPose();
+            Pose2d ekfPose         = ekf.getPose();
+            Pose2d adaptiveEkfPose = adaptiveEkf.getPose();
 
-            // ---- Telemetry 输出 ----
-            Pose2d pinpointPose = pinpointLocalizer.getPose();
-            Pose2d ekfPose = ekfLocalizer.getPose();
-            Pose2d adaptivePose = adaptiveEKF.getPose();
+            // === 记录轨迹历史 ===
+            addToHistory(pinpointHistory, pinpointPose);
+            addToHistory(mt1History, mt1Pose);
+            addToHistory(ekfHistory, ekfPose);
+            addToHistory(adaptiveHistory, adaptiveEkfPose);
 
-            telemetry.addData("Pinpoint", "x=%.2f y=%.2f h=%.1f",
-                    pinpointPose.position.x, pinpointPose.position.y,
-                    Math.toDegrees(pinpointPose.heading.toDouble()));
-            telemetry.addData("MT1 valid", mt1Localizer.isValid());
-            telemetry.addData("EKF", "x=%.2f y=%.2f h=%.1f",
-                    ekfPose.position.x, ekfPose.position.y,
-                    Math.toDegrees(ekfPose.heading.toDouble()));
-            telemetry.addData("AdaptiveEKF", "x=%.2f y=%.2f h=%.1f",
-                    adaptivePose.position.x, adaptivePose.position.y,
-                    Math.toDegrees(adaptivePose.heading.toDouble()));
-            telemetry.addData("Q Boost", "x=%.1f y=%.1f θ=%.1f",
-                    adaptiveEKF.getQBoostX(), adaptiveEKF.getQBoostY(), adaptiveEKF.getQBoostTheta());
+            // === A 键触发误差记录 ===
+            boolean aPressed = gamepad1.a;
+            if (aPressed && !prevAPressed) {
+                recordErrors(pinpointPose, mt1Pose, ekfPose, adaptiveEkfPose);
+            }
+            prevAPressed = aPressed;
+
+            // ============ Telemetry: 位姿 ============
+            telemetry.addData("Pinpoint",    formatPose(pinpointPose));
+            telemetry.addData("MT1",         formatPose(mt1Pose));
+            telemetry.addData("EKF",         formatPose(ekfPose));
+            telemetry.addData("AdaptiveEKF", formatPose(adaptiveEkfPose));
+
+            // ============ Telemetry: TestPose ============
+            Pose2d testPose = new Pose2d(testX, testY, testHeading);
+            telemetry.addData("TestPose", formatPose(testPose));
+            telemetry.addData("Press A to record error", "");
+
+            // ============ Telemetry: 已记录误差 ============
+            if (errorRecorded) {
+                telemetry.addLine("=== Errors (Δx, Δy, Δθ°) ===");
+                telemetry.addData("Pinpoint err",
+                        formatErr(errPinpointX, errPinpointY, errPinpointTheta));
+                telemetry.addData("MT1 err",
+                        formatErr(errMt1X, errMt1Y, errMt1Theta));
+                telemetry.addData("EKF err",
+                        formatErr(errEkfX, errEkfY, errEkfTheta));
+                telemetry.addData("AdaptiveEKF err",
+                        formatErr(errAdaptiveX, errAdaptiveY, errAdaptiveTheta));
+            }
+
+            // ============ Telemetry: EKFLocalizer 可调参数 ============
+            telemetry.addLine("--- EKFLocalizer ---");
+            telemetry.addData("EKF.qBase", EKFLocalizer.Qbase);
+            telemetry.addData("EKF.rBase", EKFLocalizer.Rbase);
+
+            // ============ Telemetry: AdaptiveEKFLocalizer 可调参数 ============
+            telemetry.addLine("--- AdaptiveEKFLocalizer ---");
+            telemetry.addData("AEKF.qBase",              AdaptiveEKFLocalizer.qBase);
+            telemetry.addData("AEKF.rBase",              AdaptiveEKFLocalizer.rBase);
+            telemetry.addData("AEKF.qBoostX",            AdaptiveEKFLocalizer.qBoostX);
+            telemetry.addData("AEKF.qBoostY",            AdaptiveEKFLocalizer.qBoostY);
+            telemetry.addData("AEKF.qBoostTheta",        AdaptiveEKFLocalizer.qBoostTheta);
+            telemetry.addData("AEKF.angAccelThresh",     AdaptiveEKFLocalizer.ANGULAR_ACCEL_THRESHOLD);
+            telemetry.addData("AEKF.jerkThresh",         AdaptiveEKFLocalizer.JERK_THRESHOLD);
+            telemetry.addData("AEKF.qBoostMax",          AdaptiveEKFLocalizer.Q_BOOST_MAX);
+            telemetry.addData("AEKF.qDecay",             AdaptiveEKFLocalizer.Q_DECAY);
+            telemetry.addData("AEKF.stdLowInch",         AdaptiveEKFLocalizer.STD_LOW_INCH);
+            telemetry.addData("AEKF.stdHighInch",        AdaptiveEKFLocalizer.STD_HIGH_INCH);
+            telemetry.addData("AEKF.stdLowAngle",        AdaptiveEKFLocalizer.STD_LOW_ANGLE);
+            telemetry.addData("AEKF.stdHighAngle",       AdaptiveEKFLocalizer.STD_HIGH_ANGLE);
+            telemetry.addData("AEKF.rMaxScale",          AdaptiveEKFLocalizer.R_MAX_SCALE);
+
+            // ============ Telemetry: MT1Localizer 实时质量指标 ============
+            telemetry.addLine("--- MT1Localizer ---");
+            telemetry.addData("MT1.valid",               mt1.isValid());
+            telemetry.addData("MT1.tagCount",            mt1.getTagCount());
+            telemetry.addData("MT1.avgDist (m)",         mt1.getAvgDist());
+            telemetry.addData("MT1.avgArea",             mt1.getAvgArea());
+            telemetry.addData("MT1.span (m)",            mt1.getSpan());
+            telemetry.addData("MT1.maxFiducialSkew",     mt1.getMaxFiducialSkew());
+            telemetry.addData("MT1.ambiguity (m)",       mt1.getAmbiguity());
+            telemetry.addData("MT1.angularAmb (rad)",    mt1.getAngularAmbiguity());
+            telemetry.addData("MT1.captureLatency (s)",  mt1.getCaptureLatency());
+            telemetry.addData("MT1.timestamp (s)",       mt1.getTimestamp());
+
+            double[] std = mt1.getStdDevs();
+            if (std != null && std.length >= 6) {
+                telemetry.addData("MT1.stdX (m)",         std[0]);
+                telemetry.addData("MT1.stdY (m)",         std[1]);
+                telemetry.addData("MT1.stdZ (m)",         std[2]);
+                telemetry.addData("MT1.stdRoll (deg)",    std[3]);
+                telemetry.addData("MT1.stdPitch (deg)",   std[4]);
+                telemetry.addData("MT1.stdYaw (deg)",     std[5]);
+            }
+
             telemetry.update();
 
-            // ---- Dashboard 绘制 ----
+            // === Dashboard 图形绘制 ===
             TelemetryPacket packet = new TelemetryPacket();
 
-            // 绘制四条轨迹 (不同颜色)
-            drawTrajectory(packet, pinpointHistory, "#FF0000");   // 红 — Pinpoint
-            drawTrajectory(packet, mt1History, "#00FF00");       // 绿 — MT1
-            drawTrajectory(packet, ekfHistory, "#0000FF");       // 蓝 — EKF
-            drawTrajectory(packet, adaptiveEKFHistory, "#FF00FF"); // 紫 — AdaptiveEKF
+            // TestPose — 红色
+            packet.fieldOverlay().setStroke("#F44336");
+            packet.fieldOverlay().setStrokeWidth(2);
+            Drawing.drawRobot(packet.fieldOverlay(), testPose);
 
-            // 绘制当前机器人位姿 (使用 AdaptiveEKF 位姿)
-            packet.fieldOverlay().setStroke("#3F51B5");
-            Drawing.drawRobot(packet.fieldOverlay(), adaptiveEKF.getPose());
+            // 轨迹绘制
+            drawTrail(packet.fieldOverlay(), pinpointHistory,    "#4CAF50", 2);
+            drawTrail(packet.fieldOverlay(), mt1History,         "#FF9800", 2);
+            drawTrail(packet.fieldOverlay(), ekfHistory,         "#E91E63", 2);
+            drawTrail(packet.fieldOverlay(), adaptiveHistory,    "#9C27B0", 2);
+
+            // 当前位姿绘制
+            packet.fieldOverlay().setStroke("#4CAF50");
+            packet.fieldOverlay().setStrokeWidth(2);
+            Drawing.drawRobot(packet.fieldOverlay(), pinpointPose);
+
+            packet.fieldOverlay().setStroke("#FF9800");
+            packet.fieldOverlay().setStrokeWidth(2);
+            Drawing.drawRobot(packet.fieldOverlay(), mt1Pose);
+
+            packet.fieldOverlay().setStroke("#E91E63");
+            packet.fieldOverlay().setStrokeWidth(2);
+            Drawing.drawRobot(packet.fieldOverlay(), ekfPose);
+
+            packet.fieldOverlay().setStroke("#9C27B0");
+            packet.fieldOverlay().setStrokeWidth(2);
+            Drawing.drawRobot(packet.fieldOverlay(), adaptiveEkfPose);
 
             FtcDashboard.getInstance().sendTelemetryPacket(packet);
         }
+    }
 
-        limelight.stop();
+    // ==================== 误差计算 ====================
+
+    private void recordErrors(Pose2d pp, Pose2d mt, Pose2d ek, Pose2d ae) {
+        Pose2d ref = new Pose2d(testX, testY, testHeading);
+
+        errPinpointX     = pp.position.x - ref.position.x;
+        errPinpointY     = pp.position.y - ref.position.y;
+        errPinpointTheta = normalizeAngle(pp.heading.toDouble() - ref.heading.toDouble());
+
+        errMt1X          = mt.position.x - ref.position.x;
+        errMt1Y          = mt.position.y - ref.position.y;
+        errMt1Theta      = normalizeAngle(mt.heading.toDouble() - ref.heading.toDouble());
+
+        errEkfX          = ek.position.x - ref.position.x;
+        errEkfY          = ek.position.y - ref.position.y;
+        errEkfTheta      = normalizeAngle(ek.heading.toDouble() - ref.heading.toDouble());
+
+        errAdaptiveX     = ae.position.x - ref.position.x;
+        errAdaptiveY     = ae.position.y - ref.position.y;
+        errAdaptiveTheta = normalizeAngle(ae.heading.toDouble() - ref.heading.toDouble());
+
+        errorRecorded = true;
+    }
+
+    private static double normalizeAngle(double angle) {
+        while (angle > Math.PI) angle -= 2 * Math.PI;
+        while (angle < -Math.PI) angle += 2 * Math.PI;
+        return angle;
     }
 
     // ==================== 工具 ====================
 
-    private void addToHistory(LinkedList<Pose2d> history, Pose2d pose) {
+    private static void addToHistory(List<Pose2d> history, Pose2d pose) {
         history.add(pose);
-        while (history.size() > MAX_HISTORY) {
-            history.removeFirst();
+        if (history.size() > MAX_HISTORY) {
+            history.remove(0);
         }
     }
 
-    private void drawTrajectory(TelemetryPacket packet, LinkedList<Pose2d> history, String color) {
+    private static void drawTrail(com.acmerobotics.dashboard.canvas.Canvas c,
+                                  List<Pose2d> history, String color, int width) {
         if (history.size() < 2) return;
-
-        double[] xPoints = new double[history.size()];
-        double[] yPoints = new double[history.size()];
-        int i = 0;
-        for (Pose2d p : history) {
-            xPoints[i] = p.position.x;
-            yPoints[i] = p.position.y;
-            i++;
+        c.setStroke(color);
+        c.setStrokeWidth(width);
+        c.setFill(color);
+        double[] xs = new double[history.size()];
+        double[] ys = new double[history.size()];
+        for (int i = 0; i < history.size(); i++) {
+            xs[i] = history.get(i).position.x;
+            ys[i] = history.get(i).position.y;
         }
+        c.strokePolyline(xs, ys);
+    }
 
-        packet.fieldOverlay().setStroke(color);
-        packet.fieldOverlay().setStrokeWidth(1);
-        packet.fieldOverlay().strokePolyline(xPoints, yPoints);
+    private static String formatPose(Pose2d pose) {
+        return String.format("(%.2f, %.2f, %.1f°)",
+                pose.position.x, pose.position.y,
+                Math.toDegrees(pose.heading.toDouble()));
+    }
+
+    private static String formatErr(double dx, double dy, double dtheta) {
+        return String.format("(%+.2f, %+.2f, %+.1f°)",
+                dx, dy, Math.toDegrees(dtheta));
     }
 }
