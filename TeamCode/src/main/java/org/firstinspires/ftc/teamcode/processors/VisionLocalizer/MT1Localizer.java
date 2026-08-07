@@ -34,6 +34,9 @@ public class MT1Localizer implements Localizer {
 
     private final Limelight3A limelight;
 
+    /** 单位转换: 1 m = 39.3701 in */
+    private static final double M_TO_INCH = 39.37007874;
+
     // ---- 最新结果缓存 ----
     private LLResult latestResult;
     private Pose3D botpose;
@@ -120,7 +123,7 @@ public class MT1Localizer implements Localizer {
     // ==================== 位姿输出 (Localizer 接口) ====================
 
     /**
-     * @return 全局位姿 (米, 米, 弧度)
+     * @return 全局位姿 (英寸, 英寸, 弧度)
      *         坐标系: FTC 标准场地坐标系, 原点为场地中心
      */
     @Override
@@ -129,9 +132,9 @@ public class MT1Localizer implements Localizer {
             return new Pose2d(0, 0, 0);
         }
         return new Pose2d(
-                botpose.getPosition().x,                        // 米
-                botpose.getPosition().y,                        // 米
-                Math.toRadians(botpose.getOrientation().getYaw()) // 度 → 弧度
+                botpose.getPosition().x * M_TO_INCH,               // 米 → 英寸
+                botpose.getPosition().y * M_TO_INCH,               // 米 → 英寸
+                Math.toRadians(botpose.getOrientation().getYaw())  // 度 → 弧度
         );
     }
 
@@ -141,14 +144,14 @@ public class MT1Localizer implements Localizer {
         // no-op
     }
 
-    /** @return 原始位姿数组 {x, y, theta} (米, 米, 弧度) */
+    /** @return 原始位姿数组 {x, y, theta} (英寸, 英寸, 弧度) */
     public double[] getPoseArray() {
         if (!valid || botpose == null) {
             return new double[]{0, 0, 0};
         }
         return new double[]{
-                botpose.getPosition().x,
-                botpose.getPosition().y,
+                botpose.getPosition().x * M_TO_INCH,
+                botpose.getPosition().y * M_TO_INCH,
                 Math.toRadians(botpose.getOrientation().getYaw())
         };
     }
