@@ -2,7 +2,14 @@
 
 ## 概述
 
-`FusionLocalizer` 是一个基于 **扩展卡尔曼滤波器 (EKF)** 的多传感器融合定位器，用于 FTC 机器人竞赛。它将 **里程计**（高频、短时精确、长时漂移）与 **Limelight MegaTag1 视觉定位**（低帧率、绝对位置、偶发不可用）的优势互补，输出平滑、鲁棒的全局位姿估计。
+`FusionLocalizer` 是一个多传感器融合定位器，用于 FTC 机器人竞赛。提供 **两种滤波器实现**：
+
+| 实现 | 类名 | 滤波器 | 特点 |
+|------|------|--------|------|
+| **EKF** | `EKF` / `EKFLocalizer` / `AdaptiveEKFLocalizer` | 扩展卡尔曼滤波器 | 雅可比线性化，计算量小，成熟稳定 |
+| **UKF** | `UKF` / `UKFLocalizer` / `AdaptiveUKFLocalizer` | 无迹卡尔曼滤波器 | Sigma 点无迹变换，无需雅可比，精度更高 |
+
+它将 **里程计**（高频、短时精确、长时漂移）与 **Limelight MegaTag1 视觉定位**（低帧率、绝对位置、偶发不可用）的优势互补，输出平滑、鲁棒的全局位姿估计。
 
 核心思想：**用里程计做帧间预测，用 Limelight 做绝对修正，用 Hub IMU 检测异常运动，用 Ambiguity 评估视觉置信度。**
 
@@ -15,7 +22,7 @@
 | 所需硬件 | Pinpoint + Limelight | Pinpoint + Limelight + Hub IMU |
 | 适用场景 | 平坦场地 | 有斜坡/坡道的场地 |
 
-> `EKFLocalizer` 和 `AdaptiveEKFLocalizer` 均支持 D2/D3 模式切换。
+> 所有定位器类 (`EKFLocalizer`, `AdaptiveEKFLocalizer`, `UKFLocalizer`, `AdaptiveUKFLocalizer`) 均支持 D2/D3 模式切换。EKF 和 UKF 的 API 完全兼容，可即插即用替换。
 
 ---
 
@@ -39,7 +46,7 @@
 │   adaptQ(dt) ──→ SimpleMatrix Q (3x3, in²/s)              │
 │        │                                                  │
 │        ▼                                                  │
-│   EKF.setQ(Q) + EKF.predict(vx, vy, ω, timestamp)         │
+│   EKF/UKF.setQ(Q) + EKF/UKF.predict(vx, vy, ω, timestamp)   │
 │        │           状态 x, y 单位: 英寸                    │
 │        ▼                                                  │
 │   Limelight MT1 ──→ {x_m, y_m} [米] ──→ ×39.37 ──→ {x, y} [英寸] │
@@ -48,7 +55,7 @@
 │   adaptR() ──→ SimpleMatrix R (3x3, in²)                  │
 │        │                                                  │
 │        ▼                                                  │
-│   EKF.setR(R) + EKF.update(x, y, θ, timestamp)            │
+│   EKF/UKF.setR(R) + EKF/UKF.update(x, y, θ, timestamp)      │
 │                    (仅当视觉有效)                           │
 └──────────────────────────────────────────────────────────┘
 ```
@@ -66,7 +73,7 @@
   - ω:  角速度 (rad/s)
 
 观测:     z = [x_m, y_m, θ_m]ᵀ  (Limelight 测得的全局位姿)
-  - 原始单位: 米 -> 在传入 EKF 前转换为英寸
+  - 原始单位: 米 -> 在传入滤波器前转换为英寸
 ```
 
 ---
@@ -128,6 +135,220 @@ K = P·Hᵀ · S⁻¹
 x = x + K·y
 P = (I - K·H)·P
 ```
+
+---
+
+## 2b. UKF 预测步骤 (Predict)
+
+UKF 不使用雅可比矩阵，而是通过 **无迹变换 (Unscented Transform)** 直接传播非线性分布。
+
+### 2b.1 UKF 参数
+
+UKF 需要预先设定三个参数，用于控制 sigma 点的分布：
+
+| 参数 | 值 | 含义 |
+|------|-----|------|
+| **α** (alpha) | 1.0 | Sigma 点散布因子，控制点到均值的距离。α 越小，点越集中 |
+| **β** (beta) | 2.0 | 最优参数，对于高斯分布 β=2 是最优的 |
+| **κ** (kappa) | 0.0 | 次级缩放参数，通常设为 0 或 3-n |
+| **n** | 3 | 状态维度 = [x, y, θ] |
+| **λ** | 0 | λ = α²(n+κ) - n = 1·3 - 3 = 0 |
+| **n+λ** | 3 | 缩放因子，用于计算 sigma 点偏差和权重 |
+
+### 2b.2 Sigma 点生成
+
+从当前状态估计 `x̂` 和协方差 `P` 生成 **2n+1 = 7 个** sigma 点：
+
+```
+1. 计算缩放协方差矩阵: S = (n+λ) · P = 3 · P
+
+2. Cholesky 分解: S = L · Lᵀ
+   其中 L 是下三角矩阵 (3×3)，使用 EJML DecompositionFactory_DDRM.chol() 计算
+
+3. 生成 sigma 点:
+   X₀   = x̂                              (均值点)
+   Xᵢ   = x̂ + L_colᵢ                     (i = 1, 2, 3)
+   Xᵢ₊₃ = x̂ - L_colᵢ                     (i = 1, 2, 3)
+```
+
+**Sigma 点权重**:
+
+| 索引 | 均值权重 wm | 协方差权重 wc | 说明 |
+|------|------------|--------------|------|
+| 0 | λ/(n+λ) = **0** | λ/(n+λ) + (1-α²+β) = **2** | 中心点 |
+| 1..6 | 1/(2(n+λ)) = **1/6** | 1/(2(n+λ)) = **1/6** | 外围点 |
+
+> **注意**: wc[0] = 2 是合理的。对于 n=3, α=1, β=2，权重和 Σwc = 2 + 6×(1/6) = 3，满足 Σwc = n + λ 的关系。
+
+### 2b.3 非线性运动模型传播
+
+将每个 sigma 点通过同一非线性运动模型：
+
+```
+X̂ᵢ[0] = Xᵢ[0] + Δt · (vx·cos(Xᵢ[2]) - vy·sin(Xᵢ[2]))
+X̂ᵢ[1] = Xᵢ[1] + Δt · (vx·sin(Xᵢ[2]) + vy·cos(Xᵢ[2]))
+X̂ᵢ[2] = Xᵢ[2] + Δt · ω
+```
+
+### 2b.4 加权均值 (圆形均值)
+
+```
+x̂̄[0] = Σ wm[i] · X̂ᵢ[0]       (位置: 普通加权平均)
+x̂̄[1] = Σ wm[i] · X̂ᵢ[1]       (位置: 普通加权平均)
+x̂̄[2] = atan2( Σ wm[i]·sin(X̂ᵢ[2]), Σ wm[i]·cos(X̂ᵢ[2]) )   (角度: 圆形均值)
+```
+
+**为什么使用圆形均值？** 角度是周期性的 ([-π, π])。如果 sigma 点分布在 ±π 附近，普通算术平均会产生错误结果。圆形均值 `atan2(Σsin, Σcos)` 正确处理了角度环绕。
+
+### 2b.5 协方差传播
+
+```
+P̄ = Σ wc[i] · (X̂ᵢ - x̂̄)(X̂ᵢ - x̂̄)ᵀ + Q · Δt
+```
+
+每个 sigma 点的偏差中，角度差需要归一化到 `[-π, π]` 后再计算外积。
+
+---
+
+## 3b. UKF 更新步骤 (Update)
+
+由于观测模型是线性的 (`H = I`，观测直接对应状态)，UKF 更新步骤可以简化，但仍使用完整的无迹变换以保证数值一致性。
+
+### 3b.1 观测 Sigma 点
+
+由于 `H = I`，观测 sigma 点 `Zᵢ` 等同于状态 sigma 点 `Xᵢ`：
+
+```
+Zᵢ = H · Xᵢ = Xᵢ
+```
+
+### 3b.2 新息 (Innovation)
+
+```
+预测观测均值 ẑ = Σ wm[i] · Zᵢ  (= x̂̄, 与状态均值相同)
+新息 y_innov = z - ẑ
+
+角度新息归一化到 [-π, π]
+```
+
+### 3b.3 新息协方差与交叉协方差
+
+```
+S = Σ wc[i] · (Zᵢ - ẑ)(Zᵢ - ẑ)ᵀ + R    (新息协方差)
+Pxz = Σ wc[i] · (Xᵢ - x̂̄)(Zᵢ - ẑ)ᵀ      (交叉协方差)
+```
+
+### 3b.4 卡尔曼增益与状态更新
+
+```
+K = Pxz · S⁻¹
+x̂ = x̂̄ + K · y_innov
+```
+
+### 3b.5 Joseph 形式协方差更新
+
+UKF 使用 **Joseph 形式** 更新协方差，而非 EKF 的 `(I-KH)` 形式：
+
+```
+P = P̄ - K · S · Kᵀ
+```
+
+**为什么用 Joseph 形式？**
+
+| 形式 | 公式 | 特点 |
+|------|------|------|
+| EKF 标准 | `P = (I - K·H)·P` | 简洁，但数值舍入误差可导致 P 不对称 |
+| Joseph 形式 | `P = P - K·S·Kᵀ` | 天然对称，保证正半定性，更稳定 |
+
+UKF 在 Joseph 更新后还额外执行对称性强制：
+
+```
+P = (P + Pᵀ) / 2
+```
+
+### 3b.6 Cholesky 分解与数值稳定性
+
+Sigma 点生成依赖 Cholesky 分解 `L·Lᵀ = (n+λ)·P`。当协方差矩阵 `P` 因浮点舍入误差变为非正定时，Cholesky 会失败。UKF 使用**三级正则化降级策略**：
+
+```
+尝试 1: 直接分解 scale·P
+   ↓ 失败
+尝试 2: 分解 scale·P + 1e-6 · I (加微小正则化)
+   ↓ 仍失败
+尝试 3: 分解 scale·P + 1e-3 · I (加大正则化)
+   ↓ 仍失败
+Fallback: 返回对角矩阵 sqrt(trace(scale·P)/3) · I
+```
+
+这个策略确保任何情况下都能生成有效的 sigma 点，不会因数值问题导致滤波器崩溃。
+
+---
+
+## 3c. EKF 与 UKF 对比
+
+### 3c.1 算法差异总览
+
+| 维度 | EKF | UKF |
+|------|-----|-----|
+| **非线性处理** | 一阶泰勒展开 (雅可比 `A = ∂f/∂x`) | Sigma 点无迹变换，精确到二阶矩 (高斯三阶) |
+| **雅可比矩阵** | 需手动推导 `A[0][2]=Δt·(-vx·sinθ-vy·cosθ)` | ❌ 不需要 |
+| **状态传播** | 1 次 | 7 次 (2n+1 个 sigma 点) |
+| **协方差传播** | `P = A·P·Aᵀ + Q·dt` | Sigma 点加权外积 + Q·dt |
+| **卡尔曼增益** | `K = P·(P+R)⁻¹` | `K = Pxz·S⁻¹` |
+| **协方差更新** | `P = (I-K·H)·P` | Joseph 形式 `P = P - K·S·Kᵀ` |
+| **角度均值** | 无 (仅 1 个状态点) | 圆形均值 `atan2(Σsin, Σcos)` |
+| **矩阵分解** | 无 | Cholesky 分解 (3×3) |
+| **计算量** | ~15 次 3×3 矩阵乘法 | ~15 次 3×3 矩阵乘法 + 7 次状态传播 + Cholesky |
+| **FTC 帧耗时** | < 50 μs | < 200 μs (仍然远低于 1 帧预算) |
+
+### 3c.2 何时使用 UKF
+
+| 场景 | 推荐 | 原因 |
+|------|------|------|
+| 高速旋转 (omega > 2π rad/s) | **UKF** | EKF 线性化误差在 cos/sin 快速变化时累积 |
+| 碰撞后恢复 | **UKF** | UKF 更精确地传播被碰撞扰动后的协方差 |
+| 平坦场地、低速 | EKF | 两者精度相当，EKF 更简洁 |
+| 计算资源极度受限 | EKF | UKF 的 Cholesky 分解有微小开销 |
+| 调试/教学 | EKF | 雅可比矩阵可手算验证，便于理解 |
+
+### 3c.3 精度差异的理论解释
+
+EKF 将非线性运动模型 `f(x)` 在估计点处一阶泰勒展开：
+
+```
+EKF:  f(x̂ + δx) ≈ f(x̂) + A·δx
+```
+
+这意味着 `f` 的曲率信息丢失了。当 `θ` 变化较大时（如 10ms 内旋转 0.5 rad），`cos(θ+δ)` 和 `cos(θ) - sin(θ)·δ` 之间的误差可达 ~0.12 rad，在位置传播中转化为 ~0.12·v·Δt 英寸的偏差。
+
+UKF 通过 7 个 sigma 点直接采样非线性函数，捕获了 `cos/sin` 的曲率：
+
+```
+UKF:  P̄ = Σ wc[i] · (f(Xᵢ) - x̂̄)(f(Xᵢ) - x̂̄)ᵀ
+```
+
+这等价于对 `f(x)` 做统计线性回归，最小化的是整个分布范围内的线性化误差，而非单点误差。
+
+### 3c.4 API 兼容性
+
+EKF 和 UKF 的公开 API 完全一致：
+
+```java
+// 两种滤波器使用方式完全相同
+EKF filter1 = new EKF(x, y, theta);
+UKF filter2 = new UKF(x, y, theta);
+
+filter1.predict(vx, vy, omega, timestamp);  // 与 filter2 完全相同
+filter1.update(xMeas, yMeas, thetaMeas, timestamp);  // 与 filter2 完全相同
+filter1.setQ(SimpleMatrix Q);  // 与 filter2 完全相同
+filter1.setR(SimpleMatrix R);  // 与 filter2 完全相同
+
+// 定位器封装也可以即插即用
+AdaptiveEKFLocalizer ekfLoc = new AdaptiveEKFLocalizer(...);
+AdaptiveUKFLocalizer ukfLoc = new AdaptiveUKFLocalizer(...);  // 仅类型名不同
+```
+
+自适应 Q/R 逻辑 (IMU 冲击检测、D2/D3 策略、Limelight stdDev 三段式映射、boost/decay 动态调节) 在两套实现中**完全相同**，因为自适应逻辑只调节 Q/R 矩阵的值，不依赖滤波器内部实现。
 
 ---
 
@@ -225,7 +446,7 @@ Q_diag[i] = Q_base × qBoost[i]
 - **碰撞时 (D2/D3)**：角加速度导致高 boost (最大 10x)
 - **平稳后**：qBoost 指数衰减（每帧 ×0.85），回到基线状态
 
-最终 `adaptQ(dt)` 返回一个 3x3 对角 `SimpleMatrix`，直接传入 `EKF.setQ(SimpleMatrix)`。
+最终 `adaptQ(dt)` 返回一个 3x3 对角 `SimpleMatrix`，直接传入 `EKF/UKF.setQ(SimpleMatrix)`。
 
 ### 4.5 参数调优指南
 
@@ -286,7 +507,7 @@ else:  t = (std_rad - 0.035) / (0.175 - 0.035)             # 线性插值
        R = 0.01 × (1 + t × 19)
 ```
 
-最终 `adaptR()` 返回一个 3x3 对角 `SimpleMatrix`，直接传入 `EKF.setR(SimpleMatrix)`。
+最终 `adaptR()` 返回一个 3x3 对角 `SimpleMatrix`，直接传入 `EKF/UKF.setR(SimpleMatrix)`。
 
 ### 5.4 参数调优指南
 
@@ -308,7 +529,7 @@ else:  t = (std_rad - 0.035) / (0.175 - 0.035)             # 线性插值
 里程计精度高, Limelight 偶尔更新
 → Hub IMU 角速度/角加速度平稳 → qBoost_x/y/θ ≈ 1.0
 → Q = Q_base (正常), R 根据 stdDev 缩放
-→ EKF 主要依赖里程计预测, 视觉仅做缓慢修正
+→ 滤波器主要依赖里程计预测, 视觉仅做缓慢修正
 ```
 
 ### 典型场景 2：机器人碰撞 (D2/D3)
@@ -347,7 +568,7 @@ MT1 仍然有效, 但各方向 stdDev 不均匀
 ```
 MT1 长时间无效 (无标签或遮挡)
 → 只有 predict 步骤, 没有 update 步骤
-→ EKF 纯靠里程计, 协方差 P 随时间增长
+→ 滤波器纯靠里程计, 协方差 P 随时间增长
 → 一旦视觉恢复 (stdDev 低), K 自动增大, 快速修正
 ```
 
@@ -355,9 +576,9 @@ MT1 长时间无效 (无标签或遮挡)
 
 ## 7. 单位一致性
 
-EKF 内部状态统一使用 **英寸 + 弧度**，所有传感器数据在输入前完成单位转换：
+滤波器内部状态统一使用 **英寸 + 弧度**，所有传感器数据在输入前完成单位转换：
 
-| 输入 | 原始单位 | 转换 | 输入 EKF 时单位 |
+| 输入 | 原始单位 | 转换 | 输入滤波器时单位 |
 |---|---|---|---|
 | Pinpoint 速度 (vx, vy) | in/s | 无需转换 | in/s |
 | Pinpoint 角速度 (ω) | rad/s | 无需转换 | rad/s |
@@ -365,7 +586,7 @@ EKF 内部状态统一使用 **英寸 + 弧度**，所有传感器数据在输�
 | Limelight 朝向 (θ) | 度 (°) | × π/180 | 弧度 (rad) |
 | MT1 stdDev 位置 (x, y) | 米 (m) | × 39.37 | 英寸 (in) |
 | MT1 stdDev 角度 (yaw) | 度 (°) | × π/180 | 弧度 (rad) |
-| **EKF 输出位姿** | — | — | **英寸 + 弧度** |
+| **滤波器输出位姿** | — | — | **英寸 + 弧度** |
 
 > **角度阈值独立**：`mapStdToR` 使用 `STD_LOW_INCH`/`STD_HIGH_INCH` 比较位置 stdDev；`mapStdToRAngle` 使用 `STD_LOW_ANGLE`/`STD_HIGH_ANGLE` 比较角度 stdDev，避免弧度值与英寸值误比较。
 
@@ -410,7 +631,7 @@ adaptR()
   │
   └─→ 构造 SimpleMatrix(3x3) 对角 R (in²)  →  return R
 
-EKF:
+EKF/UKF:
   setQ(SimpleMatrix Q)   — 直接接收完整 Q 矩阵
   setR(SimpleMatrix R)   — 直接接收完整 R 矩阵
   setQ(double, double, double)  — 标量接口 (保留)
@@ -430,7 +651,7 @@ EKF:
 
 ### 9.2 防过时机制
 
-EKF 内部维护 `lastUpdateTime`，拒绝 timestamp 小于等于上次更新的观测，避免网络延迟或帧率错乱导致的数据回退。
+滤波器内部维护 `lastUpdateTime`，拒绝 timestamp 小于等于上次更新的观测，避免网络延迟或帧率错乱导致的数据回退。
 
 ### 9.3 首次 Predict 处理
 
@@ -441,6 +662,8 @@ EKF 内部维护 `lastUpdateTime`，拒绝 timestamp 小于等于上次更新的
 ## 10. 参考
 
 - Kou & Haggenmiller (2023), "Extended Kalman Filter State Estimation for Autonomous Competition Robots"
+- Wan & van der Merwe (2001), "The Unscented Kalman Filter" — UKF 经典论文
+- Julier & Uhlmann (1997), "A New Extension of the Kalman Filter to Nonlinear Systems" — 无迹变换理论基础
 - Limelight MegaTag1 文档: https://docs.limelightvision.io/docs/docs-megatag
 - GoBilda Pinpoint 文档: https://docs.gobilda.com/pinpoint-odometer
 - BHI260IMU 文档: https://www.bosch-sensortec.com/products/smart-sensors/bhi260/
