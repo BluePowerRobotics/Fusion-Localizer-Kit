@@ -86,7 +86,7 @@ public class FusionTestOpMode extends LinearOpMode {
         PinpointLocalizer pinpoint = new PinpointLocalizer(hardwareMap, IN_PER_TICK, initialPose);
         MT1Localizer mt1 = new MT1Localizer(limelight);
         EKFLocalizer ekf = new EKFLocalizer(hardwareMap, limelight, initialPose);
-        AdaptiveEKFLocalizer adaptiveEkf = new AdaptiveEKFLocalizer(hardwareMap, limelight);
+        AdaptiveEKFLocalizer adaptiveEkf = new AdaptiveEKFLocalizer(hardwareMap, limelight, "imu", initialPose, false);
 
         // ---- 创建驱动 ----
         MecanumDrive drive = new MecanumDrive(hardwareMap, initialPose);
@@ -156,8 +156,10 @@ public class FusionTestOpMode extends LinearOpMode {
 
             // ============ Telemetry: EKFLocalizer 可调参数 ============
             telemetry.addLine("--- EKFLocalizer ---");
-            telemetry.addData("EKF.qBase", EKFLocalizer.Qbase);
-            telemetry.addData("EKF.rBase", EKFLocalizer.Rbase);
+            telemetry.addData("EKF.qBase", EKFLocalizer.QbasePos);
+            telemetry.addData("EKF.qBase", EKFLocalizer.QbaseAngle);
+            telemetry.addData("EKF.rBase", EKFLocalizer.RbasePos);
+            telemetry.addData("EKF.rBase", EKFLocalizer.RbaseAngle);
 
             // ============ Telemetry: AdaptiveEKFLocalizer 可调参数 ============
             telemetry.addLine("--- AdaptiveEKFLocalizer ---");
