@@ -8,8 +8,10 @@ import com.acmerobotics.roadrunner.Pose2d;
 import com.acmerobotics.roadrunner.PoseVelocity2d;
 import com.acmerobotics.roadrunner.Vector2d;
 import com.qualcomm.hardware.limelightvision.Limelight3A;
+import com.qualcomm.hardware.rev.RevHubOrientationOnRobot;
 import com.qualcomm.robotcore.eventloop.opmode.LinearOpMode;
 import com.qualcomm.robotcore.eventloop.opmode.TeleOp;
+import com.qualcomm.robotcore.hardware.IMU;
 
 import org.firstinspires.ftc.teamcode.RoadRunner.Drawing;
 import org.firstinspires.ftc.teamcode.RoadRunner.MecanumDrive;
@@ -178,10 +180,10 @@ public class FusionTestOpMode extends LinearOpMode {
 
             // ============ Telemetry: EKFLocalizer 可调参数 ============
             telemetry.addLine("--- EKFLocalizer ---");
-            telemetry.addData("EKF.qBase", EKFLocalizer.QbasePos);
-            telemetry.addData("EKF.qBase", EKFLocalizer.QbaseAngle);
-            telemetry.addData("EKF.rBase", EKFLocalizer.RbasePos);
-            telemetry.addData("EKF.rBase", EKFLocalizer.RbaseAngle);
+            telemetry.addData("EKF.QbasePos",   EKFLocalizer.QbasePos);
+            telemetry.addData("EKF.QbaseAngle", EKFLocalizer.QbaseAngle);
+            telemetry.addData("EKF.RbasePos",   EKFLocalizer.RbasePos);
+            telemetry.addData("EKF.RbaseAngle", EKFLocalizer.RbaseAngle);
 
             // ============ Telemetry: AdaptiveEKFLocalizer 可调参数 ============
             telemetry.addLine("--- AdaptiveEKFLocalizer ---");
@@ -202,10 +204,10 @@ public class FusionTestOpMode extends LinearOpMode {
 
             // ============ Telemetry: UKFLocalizer 可调参数 ============
             telemetry.addLine("--- UKFLocalizer ---");
-            telemetry.addData("UKF.qBase", UKFLocalizer.QbasePos);
-            telemetry.addData("UKF.qBase", UKFLocalizer.QbaseAngle);
-            telemetry.addData("UKF.rBase", UKFLocalizer.RbasePos);
-            telemetry.addData("UKF.rBase", UKFLocalizer.RbaseAngle);
+            telemetry.addData("UKF.QbasePos",   UKFLocalizer.QbasePos);
+            telemetry.addData("UKF.QbaseAngle", UKFLocalizer.QbaseAngle);
+            telemetry.addData("UKF.RbasePos",   UKFLocalizer.RbasePos);
+            telemetry.addData("UKF.RbaseAngle", UKFLocalizer.RbaseAngle);
 
             // ============ Telemetry: AdaptiveUKFLocalizer 可调参数 ============
             telemetry.addLine("--- AdaptiveUKFLocalizer ---");

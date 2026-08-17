@@ -38,9 +38,9 @@
 │        │                                                  │
 │        ▼                                                  │
 │   Hub IMU (BHI260IMU)                                     │
-│     ├─ D2: pitch/roll 角加速度 → 场坐标 → adaptQ_x, adaptQ_y│
-│     │  D3: pitch/roll 角速度+角加速度 → adaptQ_x, adaptQ_y │
-│     └─ yaw 角加速度 (jerk) → adaptQ_θ                      │
+│     ├─ D2: roll/pitch 角加速度 → 场坐标 → 交叉映射 → adaptQ_x, adaptQ_y│
+│     │  D3: roll/pitch 角速度 → 场坐标 → 交叉映射 → adaptQ_x, adaptQ_y │
+│     └─ yaw 角加速度 → adaptQ_θ                             │
 │        │                                                  │
 │        ▼                                                  │
 │   adaptQ(dt) ──→ SimpleMatrix Q (3x3, in²/s)              │
@@ -358,75 +358,71 @@ AdaptiveUKFLocalizer ukfLoc = new AdaptiveUKFLocalizer(...);  // 仅类型名不
 
 当机器人发生碰撞、急停、被其他机器人撞击时，**里程计会瞬间产生不可靠的位移**（编码器打滑、IMU 震荡）。如果此时 EKF 仍然信任里程计预测，融合位姿会偏离真实位置。
 
-此外，在 **D3 模式**下，机器人经过斜坡时坡度变化会导致里程计速度的投影关系改变，也需要适当提高 Q 值。
+此外，在 **D3 模式**下，机器人经过斜坡时坡度变化会导致pinpoint腾空，也需要适当提高 Q 值。
 
-**解决方案**：使用 Hub IMU (BHI260IMU) 检测异常运动，**各方向独立**调节 Q 倍增因子。D2 和 D3 使用不同的检测策略。
+**解决方案**：使用 Hub IMU (BHI260IMU) 检测异常运动，**各方向独立**调节 Q 倍增因子。D2 和 D3 使用不同的检测策略。不确定性方向与旋转轴垂直：pitch 绕 body Y 轴 → X 方向轮子腾空，roll 绕 body X 轴 → Y 方向轮子腾空。
 
 ### 4.2 D2 模式：仅角加速度 (冲击检测)
 
-Hub IMU 无法直接提供线性加速度，因此使用 pitch/roll 角加速度作为机器人受到冲击的间接指标，再通过当前航向角将体坐标系扰动转换到场坐标系。
+Hub IMU 无法直接提供线性加速度，因此使用 roll/pitch 角加速度作为机器人受到冲击的间接指标，再通过当前航向角将体坐标系扰动转换到场坐标系。
+
+**体坐标系定义**:
+- roll = `xRotationRate` → 绕 body X 轴（左右）旋转
+- pitch = `yRotationRate` → 绕 body Y 轴（前后）旋转
+- yaw = `zRotationRate` → 绕 body Z 轴（垂直）旋转
+
+**交叉映射原理**: 不确定性方向与旋转轴垂直。pitch 绕 body Y 轴 → X 方向轮子腾空，roll 绕 body X 轴 → Y 方向轮子腾空。
 
 | 方向 | 传感器 | 物理量 | 物理含义 |
 |---|---|---|---|
-| **x** | Hub IMU pitch 角加速度 | `\|fieldX\|` (rad/s²) | 前向/后向碰撞（体坐标系 pitch → 旋转到场 x） |
-| **y** | Hub IMU roll 角加速度 | `\|fieldY\|` (rad/s²) | 侧向碰撞（体坐标系 roll → 旋转到场 y） |
-| **θ** | Hub IMU yaw 角速度 jerk | `\|Δω_z/Δt\|` (rad/s²) | 旋转方向的碰撞急停 |
+| **x** | Hub IMU pitch 角加速度 | `\|fieldY\|` (rad/s²) | 前向/后向碰撞（pitch 绕 Y → X 方向腾空，取 fieldY 分量） |
+| **y** | Hub IMU roll 角加速度 | `\|fieldX\|` (rad/s²) | 侧向碰撞（roll 绕 X → Y 方向腾空，取 fieldX 分量） |
+| **θ** | Hub IMU yaw 角加速度 | `\|Δω_z/Δt\|` (rad/s²) | 旋转方向的碰撞 |
 
 数据来源：
-- `getRobotAngularVelocity(AngleUnit.RADIANS).xRotationRate` / `.yRotationRate` — pitch/roll 角速度
-- `getRobotAngularVelocity(AngleUnit.RADIANS).zRotationRate` — yaw 角速度
+- `getRobotAngularVelocity(AngleUnit.RADIANS).xRotationRate` → roll 角速度
+- `getRobotAngularVelocity(AngleUnit.RADIANS).yRotationRate` → pitch 角速度
+- `getRobotAngularVelocity(AngleUnit.RADIANS).zRotationRate` → yaw 角速度
 
-体坐标系 → 场坐标系旋转公式：
+体坐标系 → 场坐标系旋转公式 (Rz(θ)):
 ```
-pitchAccel = (pitchRate - lastPitchRate) / dt
 rollAccel  = (rollRate  - lastRollRate)  / dt
+pitchAccel = (pitchRate - lastPitchRate) / dt
 
-fieldX = pitchAccel · cos(heading) - rollAccel · sin(heading)
-fieldY = pitchAccel · sin(heading) + rollAccel · cos(heading)
+fieldX = rollAccel · cos(heading) - pitchAccel · sin(heading)
+fieldY = rollAccel · sin(heading) + pitchAccel · cos(heading)
 
-qBoostX = updateBoost(qBoostX, |fieldX|, ANGULAR_ACCEL_THRESHOLD)
-qBoostY = updateBoost(qBoostY, |fieldY|, ANGULAR_ACCEL_THRESHOLD)
+// 交叉映射: pitch 绕 Y → X 方向腾空 → X 不确定度取 fieldY
+//           roll  绕 X → Y 方向腾空 → Y 不确定度取 fieldX
+qBoostX = updateBoost(qBoostX, |fieldY|, ANGULAR_ACCEL_THRESHOLD)
+qBoostY = updateBoost(qBoostY, |fieldX|, ANGULAR_ACCEL_THRESHOLD)
 ```
 
-### 4.3 D3 模式：角速度 + 角加速度共同调节
+### 4.3 D3 模式：角速度 (坡度变化检测)
 
-D3 模式使用 `PinpointD3Localizer` 进行 3D 斜坡补偿，里程计本身已对斜坡做了速度投影校正。但坡度**变化时**（如上坡过渡到平地），里程计的速度估计仍可能产生瞬时偏差。因此 D3 的 adaptQ 同时考虑两种信号，**均旋转到场地坐标系后各方向独立计算**：
+D3 模式使用 `PinpointD3Localizer` 进行 3D 斜坡补偿，里程计本身已对斜坡做了速度投影校正。但坡度**变化时**（如上坡过渡到平地），里程计的速度估计仍可能产生瞬时偏差。D3 使用**角速度**检测坡度变化，同样以交叉映射分配到各方向：
 
 | 信号 | 检测内容 | 物理含义 | Boost 上限 |
 |------|----------|----------|------------|
-| **场地坐标系角速度** | `\|fieldVelX\|`, `\|fieldVelY\|` | 坡度变化（机器人正在倾斜/恢复） | 较低 (4x) |
-| **场地坐标系角加速度** | `\|fieldX\|`, `\|fieldY\|` | 冲击（碰撞、急停） | 较高 (10x) |
+| **场地坐标系角速度** | `\|fieldVelY\|`, `\|fieldVelX\|` | 坡度变化（机器人正在倾斜/恢复），交叉映射 | 10x |
 | **yaw 角加速度** | `\|Δω_yaw/Δt\|` | 旋转冲击 | 10x |
 
-> **重要**: yaw 角速度与坡度无关，不参与 D3 的坡度变化检测。yaw 仅使用角加速度 (jerk) 来检测旋转冲击。
+> **重要**: yaw 角速度与坡度无关，不参与 D3 的坡度变化检测。yaw 仅使用角加速度来检测旋转冲击。
 
-D3 将角速度也旋转到场地坐标系，与角加速度在同一坐标系下各方向独立比较：
+D3 将角速度旋转到场地坐标系后交叉映射：
 
 ```
-// 角速度旋转到场地坐标系 (与 D2 角加速度旋转方式一致)
-fieldVelX = pitchRate · cos(heading) - rollRate · sin(heading)
-fieldVelY = pitchRate · sin(heading) + rollRate · cos(heading)
+// 角速度旋转到场地坐标系 (Rz(θ))
+fieldVelX = rollRate · cos(heading) - pitchRate · sin(heading)
+fieldVelY = rollRate · sin(heading) + pitchRate · cos(heading)
 
-// 角加速度已在上方旋转到场地坐标系
-fieldX = pitchAccel · cos(heading) - rollAccel · sin(heading)
-fieldY = pitchAccel · sin(heading) + rollAccel · cos(heading)
-
-// ===== 各方向独立计算 =====
-
-// X 方向
-velEquivX = |fieldVelX| × (ANGULAR_ACCEL_THRESHOLD / ANGULAR_VEL_THRESHOLD)
-effectiveMagX = velEquivX + |fieldX|
-maxBoostX = (velEquivX > |fieldX|) ? VEL_BOOST_MAX : ACCEL_BOOST_MAX
-qBoostX = updateBoost(qBoostX, effectiveMagX, ANGULAR_ACCEL_THRESHOLD, maxBoostX)
-
-// Y 方向 (同理)
-velEquivY = |fieldVelY| × (ANGULAR_ACCEL_THRESHOLD / ANGULAR_VEL_THRESHOLD)
-effectiveMagY = velEquivY + |fieldY|
-maxBoostY = (velEquivY > |fieldY|) ? VEL_BOOST_MAX : ACCEL_BOOST_MAX
-qBoostY = updateBoost(qBoostY, effectiveMagY, ANGULAR_ACCEL_THRESHOLD, maxBoostY)
+// 交叉映射: pitch 绕 Y → X 方向腾空 → X 不确定度取 fieldVelY
+//           roll  绕 X → Y 方向腾空 → Y 不确定度取 fieldVelX
+qBoostX = updateBoost(qBoostX, |fieldVelY|, ANGULAR_VEL_THRESHOLD, VEL_BOOST_MAX)
+qBoostY = updateBoost(qBoostY, |fieldVelX|, ANGULAR_VEL_THRESHOLD, VEL_BOOST_MAX)
 ```
 
-**设计意图**：旋转到场地坐标系后，各方向独立判断。例如机器人面向前方上坡时，pitch 角速度主要映射到场地 X 方向，仅提升 X 方向的 Q；侧面碰撞时 roll 角加速度主要映射到场地 Y 方向，仅提升 Y 方向的 Q。
+**设计意图**：旋转到场地坐标系后交叉映射，各方向独立判断。例如机器人面向前方上坡时，pitch 角速度主要映射到场地 Y 方向，交叉映射后提升 X 方向的 Q；侧面碾压时 roll 角速度主要映射到场地 X 方向，交叉映射后提升 Y 方向的 Q。
 
 ### 4.4 Q 调整策略
 
@@ -441,9 +437,8 @@ else:
 Q_diag[i] = Q_base × qBoost[i]
 ```
 
-- **冲击时**：qBoost 指数增长，冲击幅度越大提升越快
-- **坡度变化时 (D3)**：角速度导致中等 boost (最大 4x)
-- **碰撞时 (D2/D3)**：角加速度导致高 boost (最大 10x)
+- **冲击时 (D2)**：角加速度导致 qBoost 指数增长，冲击幅度越大提升越快
+- **坡度变化时 (D3)**：角速度导致 qBoost 指数增长 (最大 10x)
 - **平稳后**：qBoost 指数衰减（每帧 ×0.85），回到基线状态
 
 最终 `adaptQ(dt)` 返回一个 3x3 对角 `SimpleMatrix`，直接传入 `EKF/UKF.setQ(SimpleMatrix)`。
@@ -452,12 +447,11 @@ Q_diag[i] = Q_base × qBoost[i]
 
 | 参数 | 推荐值 | 含义 | 模式 |
 |------|--------|------|------|
-| `ANGULAR_ACCEL_THRESHOLD` | 5.0 rad/s² | pitch/roll 角加速度触发阈值 | D2, D3 |
-| `JERK_THRESHOLD` | 4.0 rad/s² | yaw 角加速度 (jerk) 触发阈值 | D2, D3 |
-| `ANGULAR_VEL_THRESHOLD` | 1.0 rad/s | pitch/roll 角速度触发阈值 (坡度变化) | D3 |
+| `ANGULAR_ACCEL_THRESHOLD` | 5.0 rad/s² | roll/pitch 角加速度触发阈值 | D2 |
+| `JERK_THRESHOLD` | 4.0 rad/s² | yaw 角加速度触发阈值 | D2, D3 |
+| `ANGULAR_VEL_THRESHOLD` | 1.0 rad/s | roll/pitch 角速度触发阈值 (坡度变化) | D3 |
 | `VEL_BOOST_MAX` | 10.0 | 角速度最大 Q 倍增因子 (坡度变化) | D3 |
-| `ACCEL_BOOST_MAX` | 4.0 | 角加速度最大 Q 倍增因子 (冲击) | D3 |
-| `Q_BOOST_MAX` | 4.0 | 最大 Q 倍增因子 | D2 |
+| `Q_BOOST_MAX` | 10.0 | 最大 Q 倍增因子 | D2 |
 | `Q_DECAY` | 0.85 | 每帧衰减系数 | D2, D3 |
 
 ---
@@ -532,10 +526,10 @@ else:  t = (std_rad - 0.035) / (0.175 - 0.035)             # 线性插值
 → 滤波器主要依赖里程计预测, 视觉仅做缓慢修正
 ```
 
-### 典型场景 2：机器人碰撞 (D2/D3)
+### 典型场景 2：机器人碰撞 (D2)
 
 ```
-Hub IMU 检测到 pitch/roll 角加速度 >> 5 rad/s² 或 yaw jerk >> 4 rad/s²
+Hub IMU 检测到 roll/pitch 角加速度 >> 5 rad/s² 或 yaw 角加速度 >> 4 rad/s²
 → 对应方向的 qBoost 瞬间提升到 3~10x
 → 该方向 Q 变大, 滤波器不再信任里程计预测
 → 下次视觉更新时, 该方向卡尔曼增益 K 很大
@@ -546,11 +540,10 @@ Hub IMU 检测到 pitch/roll 角加速度 >> 5 rad/s² 或 yaw jerk >> 4 rad/s²
 ### 典型场景 3：坡度变化 (D3 专属)
 
 ```
-机器人上坡或下坡时, pitch/roll 角速度 >> 1 rad/s
-→ D3 角速度检测触发 → qBoost_x/y 提升到 2~4x (中等 boost)
+机器人上坡或下坡时, roll/pitch 角速度 >> 1 rad/s
+→ D3 角速度检测触发 → qBoost_x/y 提升到 2~10x
 → Q 适度增大, 里程计在坡度过渡期的不可靠性被考虑
 → 坡度稳定后 (角速度下降), qBoost 快速衰减 → 回到正常 Q
-→ 同时角加速度检测仍在工作, 如遇碰撞可叠加更高 boost
 ```
 
 ### 典型场景 4：Limelight 部分遮挡（单标签，远距离）
@@ -603,20 +596,18 @@ private static final double M_TO_INCH = 39.37007874;
 adaptQ(double dt)
   │
   ├─ D2 模式:
-  │   ├─ hubImu.getRobotAngularVelocity() → pitchRate, rollRate
-  │   │   → pitchAccel, rollAccel → 旋转到场坐标 → fieldX, fieldY → qBoostX, qBoostY
-  │   └─ hubImu.getRobotAngularVelocity() → yawRate → jerk → qBoostTheta
+  │   ├─ hubImu.getRobotAngularVelocity() → rollRate(xRotationRate), pitchRate(yRotationRate)
+  │   │   → rollAccel, pitchAccel → 旋转到场坐标 (Rz(θ))
+  │   │   → fieldX = rollAccel·cosH - pitchAccel·sinH
+  │   │   → fieldY = rollAccel·sinH + pitchAccel·cosH
+  │   │   → 交叉映射: qBoostX ← |fieldY|, qBoostY ← |fieldX|
+  │   └─ hubImu.getRobotAngularVelocity() → yawRate → |α_yaw| → qBoostTheta
   │
   ├─ D3 模式:
-  │   ├─ hubImu.getRobotAngularVelocity() → pitchRate, rollRate
-  │   │   ├─ fieldVelX = pitchRate·cosH - rollRate·sinH  (场地 X 角速度)
-  │   │   ├─ fieldVelY = pitchRate·sinH + rollRate·cosH  (场地 Y 角速度)
-  │   │   ├─ fieldX = pitchAccel·cosH - rollAccel·sinH   (场地 X 角加速度)
-  │   │   └─ fieldY = pitchAccel·sinH + rollAccel·cosH   (场地 Y 角加速度)
-  │   │   → 各方向: velEquiv = |fieldVel| × (THRESHOLD_ACCEL/THRESHOLD_VEL)
-  │   │   → effectiveMag = max(velEquiv, |fieldAccel|)
-  │   │   → maxBoost = velEquiv > |fieldAccel| ? VEL_BOOST_MAX : ACCEL_BOOST_MAX
-  │   │   → updateBoost(..., effectiveMag, ..., maxBoost) → qBoostX, qBoostY
+  │   ├─ hubImu.getRobotAngularVelocity() → rollRate, pitchRate
+  │   │   ├─ fieldVelX = rollRate·cosH - pitchRate·sinH
+  │   │   ├─ fieldVelY = rollRate·sinH + pitchRate·cosH
+  │   │   → 交叉映射: qBoostX ← |fieldVelY|, qBoostY ← |fieldVelX|
   │   └─ hubImu.getRobotAngularVelocity() → yawRate
   │       └─ |α_yaw| → updateBoost → qBoostTheta  (yaw角速度不参与)
   │

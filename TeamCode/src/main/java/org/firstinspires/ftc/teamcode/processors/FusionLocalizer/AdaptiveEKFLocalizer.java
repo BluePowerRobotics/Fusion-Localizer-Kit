@@ -37,9 +37,9 @@ import org.firstinspires.ftc.teamcode.utility.filter.EKF.EKF;
  *
  * <p><b>自适应 Q 策略</b> (D2 与 D3 不同)：
  * <ul>
- *   <li><b>D2</b>: pitch/roll 角加速度 → 冲击检测；yaw 角速度 jerk → 旋转冲击</li>
- *   <li><b>D3</b>: pitch/roll 角速度 (坡度变化) + 角加速度 (冲击) 共同调节；
- *        yaw 角加速度 (旋转冲击)；yaw 角速度与坡度无关，不参与计算</li>
+ *   <li><b>D2</b>: roll/pitch 角加速度 → 冲击检测；yaw 角加速度 → 旋转冲击</li>
+ *   <li><b>D3</b>: roll/pitch 角速度 → 坡度变化检测；yaw 角加速度 → 旋转冲击</li>
+ *   <li>不确定性方向与旋转轴垂直: pitch 绕 body Y → X 方向腾空, roll 绕 body X → Y 方向腾空</li>
  * </ul>
  *
  * <p><b>R 自适应</b>: MT1 各方向 stdDev → 各方向独立 R 矩阵
@@ -61,11 +61,11 @@ public class AdaptiveEKFLocalizer implements Localizer {
     private PoseVelocity2d lastVel = new PoseVelocity2d(new Vector2d(0, 0), 0);
 
     // ---- Q 自适应: IMU 检测 ----
-    /** 上一帧 pitch 角速度 (rad/s) — 用于计算角加速度 */
-    private double lastPitchRate = 0;
-    /** 上一帧 roll 角速度 (rad/s) — 用于计算角加速度 */
+    /** 上一帧 roll 角速度 (rad/s) — 绕 body X 轴 (左右) */
     private double lastRollRate = 0;
-    /** 上一帧 yaw 角速度 (rad/s) — 用于计算角加速度 (jerk) */
+    /** 上一帧 pitch 角速度 (rad/s) — 绕 body Y 轴 (前后) */
+    private double lastPitchRate = 0;
+    /** 上一帧 yaw 角速度 (rad/s) — 绕 body Z 轴 (垂直) */
     private double lastYawRate = 0;
 
     /** Q 基值 (in²/s) */
@@ -201,16 +201,16 @@ public class AdaptiveEKFLocalizer implements Localizer {
     /**
      * 基于 IMU 角速度/角加速度构建 3x3 对角 Q 矩阵。
      *
-     * <p><b>D2 模式</b> (仅角加速度)：
+     * <p><b>D2 模式</b> (角加速度)：
      * <ul>
-     *   <li><b>x, y</b>: pitch/roll 角加速度 → 旋转到绝对坐标系 → 检测碰撞/急加速</li>
-     *   <li><b>θ</b>: yaw 角速度 jerk → 检测旋转碰撞</li>
+     *   <li><b>x, y</b>: roll/pitch 角加速度 → 旋转到场坐标系 → 交叉映射 (pitch→X, roll→Y)</li>
+     *   <li><b>θ</b>: yaw 角加速度 → 检测旋转碰撞</li>
      * </ul>
      *
-     * <p><b>D3 模式</b> (角速度 + 角加速度共同调节)：
+     * <p><b>D3 模式</b> (角速度)：
      * <ul>
-     *   <li><b>x, y</b>: pitch/roll 角速度 (坡度变化, 较低 boost) + 角加速度 (冲击, 较高 boost)</li>
-     *   <li><b>θ</b>: yaw 角加速度 (旋转冲击)；yaw 角速度与坡度无关，不参与计算</li>
+     *   <li><b>x, y</b>: roll/pitch 角速度 → 旋转到场坐标系 → 交叉映射 (pitch→X, roll→Y)</li>
+     *   <li><b>θ</b>: yaw 角加速度 → 检测旋转冲击</li>
      * </ul>
      *
      * @param dt 帧间隔 (秒)
@@ -229,60 +229,45 @@ public class AdaptiveEKFLocalizer implements Localizer {
         if (hubImu != null) {
             AngularVelocity angVel = hubImu.getRobotAngularVelocity(AngleUnit.RADIANS);
             if (angVel != null) {
-                double pitchRate = angVel.xRotationRate;
-                double rollRate  = angVel.yRotationRate;
+                double rollRate  = angVel.xRotationRate;  // rotation about X axis (roll)
+                double pitchRate = angVel.yRotationRate;  // rotation about Y axis (pitch)
                 double yawRate   = angVel.zRotationRate;
 
                 // ---- pitch/roll 角加速度 (冲击) ----
                 double pitchAccel = (pitchRate - lastPitchRate) / safeDt;
                 double rollAccel  = (rollRate  - lastRollRate)  / safeDt;
 
-                // 体坐标系 → 场坐标系旋转
-                double fieldX = pitchAccel * cosT - rollAccel * sinT;
-                double fieldY = pitchAccel * sinT + rollAccel * cosT;
+                // 体坐标系 → 场坐标系旋转 (Rz(θ))
+                // angular velocity vector in body: [rollRate, pitchRate]^T
+                double fieldX = rollAccel * cosT - pitchAccel * sinT;
+                double fieldY = rollAccel * sinT + pitchAccel * cosT;
 
                 if (useD3) {
-                    // ========== D3: 角速度 + 角加速度共同调节 ==========
-                    // 将角速度和角加速度均旋转到场地坐标系，各方向独立计算
+                    // ========== D3: 角速度 (坡度变化检测) ==========
+                    // 旋转到场地坐标系，然后交叉映射:
+                    // pitch 绕 body Y → X 方向轮子腾空 → X 不确定度 (取 fieldY 分量)
+                    // roll  绕 body X → Y 方向轮子腾空 → Y 不确定度 (取 fieldX 分量)
+                    double fieldVelX = rollRate * cosT - pitchRate * sinT;
+                    double fieldVelY = rollRate * sinT + pitchRate * cosT;
 
-                    // 角速度旋转到场地坐标系
-                    double fieldVelX = pitchRate * cosT - rollRate * sinT;
-                    double fieldVelY = pitchRate * sinT + rollRate * cosT;
+                    qBoostX = updateBoost(qBoostX, Math.abs(fieldVelY), ANGULAR_VEL_THRESHOLD, VEL_BOOST_MAX);
+                    qBoostY = updateBoost(qBoostY, Math.abs(fieldVelX), ANGULAR_VEL_THRESHOLD, VEL_BOOST_MAX);
 
-                    // 角加速度已在上方旋转到场地坐标系 (fieldX, fieldY)
-                    double absVelX   = Math.abs(fieldVelX);
-                    double absAccelX = Math.abs(fieldX);
-                    double absVelY   = Math.abs(fieldVelY);
-                    double absAccelY = Math.abs(fieldY);
-
-                    // 将角速度归一化到角加速度尺度，便于比较
-                    // 1 rad/s 角速度 ≈ (ACCEL_THRESHOLD/VEL_THRESHOLD) rad/s² 等效角加速度
-                    double velEquivX = absVelX * (ANGULAR_ACCEL_THRESHOLD / ANGULAR_VEL_THRESHOLD);
-                    double velEquivY = absVelY * (ANGULAR_ACCEL_THRESHOLD / ANGULAR_VEL_THRESHOLD);
-
-                    double effectiveMagX = velEquivX + absAccelX;
-                    double effectiveMagY = velEquivY + absAccelY;
-
-                    // 角速度主导 → 坡度变化 (较高 boost), 角加速度主导 → 冲击 (较低 boost)
-                    double maxBoostX = (velEquivX > absAccelX) ? VEL_BOOST_MAX : ACCEL_BOOST_MAX;
-                    double maxBoostY = (velEquivY > absAccelY) ? VEL_BOOST_MAX : ACCEL_BOOST_MAX;
-
-                    qBoostX = updateBoost(qBoostX, effectiveMagX, ANGULAR_ACCEL_THRESHOLD, maxBoostX);
-                    qBoostY = updateBoost(qBoostY, effectiveMagY, ANGULAR_ACCEL_THRESHOLD, maxBoostY);
-
-                    // yaw: 仅角加速度 (旋转冲击)，角速度与坡度无关
+                    // yaw: 角加速度 (旋转冲击)
                     double yawAccel = Math.abs((yawRate - lastYawRate) / safeDt);
                     qBoostTheta = updateBoost(qBoostTheta, yawAccel, JERK_THRESHOLD);
 
                 } else {
-                    // ========== D2: 仅角加速度 (冲击检测) ==========
+                    // ========== D2: 角加速度 (冲击检测) ==========
+                    // 交叉映射: pitch 绕 body Y → X 方向轮子腾空 → X 不确定度 (取 fieldY 分量)
+                    //           roll  绕 body X → Y 方向轮子腾空 → Y 不确定度 (取 fieldX 分量)
 
-                    qBoostX = updateBoost(qBoostX, Math.abs(fieldX), ANGULAR_ACCEL_THRESHOLD);
-                    qBoostY = updateBoost(qBoostY, Math.abs(fieldY), ANGULAR_ACCEL_THRESHOLD);
+                    qBoostX = updateBoost(qBoostX, Math.abs(fieldY), ANGULAR_ACCEL_THRESHOLD);
+                    qBoostY = updateBoost(qBoostY, Math.abs(fieldX), ANGULAR_ACCEL_THRESHOLD);
 
-                    // yaw 角速度 jerk
-                    double jerk = Math.abs((yawRate - lastYawRate) / safeDt);
-                    qBoostTheta = updateBoost(qBoostTheta, jerk, JERK_THRESHOLD);
+                    // yaw 角加速度
+                    double yawAccel = Math.abs((yawRate - lastYawRate) / safeDt);
+                    qBoostTheta = updateBoost(qBoostTheta, yawAccel, JERK_THRESHOLD);
                 }
 
                 lastPitchRate = pitchRate;
