@@ -49,8 +49,11 @@ public class IMUtest extends LinearOpMode {
 
             telemetry.addLine();
             if (angVel != null) {
-                telemetry.addData("xRotRate (roll)",  "%.4f rad/s", angVel.xRotationRate);
-                telemetry.addData("yRotRate (pitch)", "%.4f rad/s", angVel.yRotationRate);
+                // IMU 体坐标系 (X=右, Y=前, Z=上) 与 RR 体坐标系 (X=前, Y=左, Z=上) 的映射:
+                //   Robot X (右) → RR -Y (右) → pitch 轴 (前后倾斜)
+                //   Robot Y (前) → RR X (前) → roll 轴 (左右倾斜)
+                telemetry.addData("xRotRate (pitch)", "%.4f rad/s", angVel.xRotationRate);
+                telemetry.addData("yRotRate (roll)",  "%.4f rad/s", angVel.yRotationRate);
                 telemetry.addData("zRotRate (yaw)",   "%.4f rad/s", angVel.zRotationRate);
             }
 

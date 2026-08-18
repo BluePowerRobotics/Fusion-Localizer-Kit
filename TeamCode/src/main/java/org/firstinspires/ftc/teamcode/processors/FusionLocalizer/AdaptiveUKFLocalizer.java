@@ -229,9 +229,12 @@ public class AdaptiveUKFLocalizer implements Localizer {
         if (hubImu != null) {
             AngularVelocity angVel = hubImu.getRobotAngularVelocity(AngleUnit.RADIANS);
             if (angVel != null) {
-                double rollRate  = angVel.xRotationRate;  // rotation about X axis (roll)
-                double pitchRate = angVel.yRotationRate;  // rotation about Y axis (pitch)
-                double yawRate   = angVel.zRotationRate;
+                // IMU 体坐标系 (X=右, Y=前) → RR 体坐标系 (X=前, Y=左):
+                //   xRotationRate (绕 Robot X/右) → pitch (绕 RR Y/左, 前后倾斜)
+                //   yRotationRate (绕 Robot Y/前) → roll  (绕 RR X/前, 左右倾斜)
+                double pitchRate = angVel.xRotationRate;
+                double rollRate  = angVel.yRotationRate;
+                double yawRate   = angVel.zRotationRate;  // 仅用于角速度变化率检测, 非绝对值
 
                 // ---- pitch/roll 角加速度 (冲击) ----
                 double pitchAccel = (pitchRate - lastPitchRate) / safeDt;
