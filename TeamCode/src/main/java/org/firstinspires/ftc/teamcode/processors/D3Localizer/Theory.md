@@ -35,14 +35,14 @@
 `getRobotYawPitchRollAngles()` 返回 ZYX 内旋欧拉角，定义在官方 **Robot Coordinate System**（X = 右, Y = 前, Z = 上）中。与 RR 体坐标系 (§2.1) 的对应关系如下：
 
 \[
-R = R_z(\psi) \cdot R_y(\theta) \cdot R_x(\phi)
+R = R_z(\psi) \cdot R_y(\phi) \cdot R_x(\theta)
 \]
 
 | 符号 | Robot CS 轴 | RR 体轴 | 映射关系 | 正方向 (右手定则) | 物理含义 |
 |------|------------|--------|----------|-------------------|----------|
 | \(\psi\) | Z (上) | z (上) | \(Z \mapsto z\) | 逆时针 | 航向角 (Yaw) |
 | \(\theta\) | X (右) | \(-y\) (右) | \(X \mapsto -y\) | 抬头 | 俯仰角 (Pitch) |
-| \(\phi\) | Y (前) | \(x\) (前) | \(Y \mapsto x\) | 左倾 | 横滚角 (Roll) |
+| \(\phi\) | Y (前) | \(x\) (前) | \(Y \mapsto x\) | 左侧抬起 | 横滚角 (Roll) |
 
 > **坐标系映射**: Robot CS 到 RR 体坐标系 (§2.1) 的映射为：
 > \[
@@ -71,8 +71,10 @@ R = R_z(\psi) \cdot R_y(\theta) \cdot R_x(\phi)
 在体坐标系中，从体坐标系 B 到世界坐标系 W 的旋转矩阵为：
 
 \[
-R = R_z(\psi) \cdot R_y(\theta) \cdot R_x(\phi)
+R = R_z(\psi) \cdot R_y(-\theta) \cdot R_x(\phi)
 \]
+
+> **关键符号约定（与旧版 D3 推导的差异）**：俯仰角 \(\theta\) 绕体坐标系 **\(-y\)（右）** 轴旋转（对应 Robot CS 绕 X 轴），因此在体坐标系中应以 \(R_y(-\theta)\) 表示。若误写为 \(R_y(+\theta)\)，则交叉项 \(v_y^{body}\sin\theta\sin\phi\) 的符号会被翻转。实测约定 pitch 前仰为正、roll 左侧抬起为正，正确的交叉项符号为 **负号**（详见 §5.2）。
 
 其中各基础旋转矩阵为：
 
@@ -82,10 +84,10 @@ R_x(\phi) = \begin{bmatrix}
 0 & \cos\phi & -\sin\phi \\
 0 & \sin\phi & \cos\phi
 \end{bmatrix}, \quad
-R_y(\theta) = \begin{bmatrix}
-\cos\theta & 0 & \sin\theta \\
+R_y(-\theta) = \begin{bmatrix}
+\cos\theta & 0 & -\sin\theta \\
 0 & 1 & 0 \\
--\sin\theta & 0 & \cos\theta
+\sin\theta & 0 & \cos\theta
 \end{bmatrix}, \quad
 R_z(\psi) = \begin{bmatrix}
 \cos\psi & -\sin\psi & 0 \\
@@ -96,14 +98,14 @@ R_z(\psi) = \begin{bmatrix}
 
 ### 4.1 倾斜旋转矩阵 (不含 Yaw)
 
-先计算倾斜部分 \(R_{tilt} = R_y(\theta) \cdot R_x(\phi)\)：
+先计算倾斜部分 \(R_{tilt} = R_y(-\theta) \cdot R_x(\phi)\)：
 
 \[
 \begin{aligned}
 R_{tilt} &= \begin{bmatrix}
-\cos\theta & 0 & \sin\theta \\
+\cos\theta & 0 & -\sin\theta \\
 0 & 1 & 0 \\
--\sin\theta & 0 & \cos\theta
+\sin\theta & 0 & \cos\theta
 \end{bmatrix} \cdot
 \begin{bmatrix}
 1 & 0 & 0 \\
@@ -111,9 +113,9 @@ R_{tilt} &= \begin{bmatrix}
 0 & \sin\phi & \cos\phi
 \end{bmatrix} \\[10pt]
 &= \begin{bmatrix}
-\cos\theta & \sin\theta\sin\phi & \sin\theta\cos\phi \\
+\cos\theta & -\sin\theta\sin\phi & -\sin\theta\cos\phi \\
 0 & \cos\phi & -\sin\phi \\
--\sin\theta & \cos\theta\sin\phi & \cos\theta\cos\phi
+\sin\theta & \cos\theta\sin\phi & \cos\theta\cos\phi
 \end{bmatrix}
 \end{aligned}
 \]
@@ -168,15 +170,15 @@ v_y^{body} &= -v_x^{field} \sin\psi + v_y^{field} \cos\psi
 \[
 \begin{aligned}
 \mathbf{V}_{tilt} &= \begin{bmatrix}
-\cos\theta & \sin\theta\sin\phi & \sin\theta\cos\phi \\
+\cos\theta & -\sin\theta\sin\phi & -\sin\theta\cos\phi \\
 0 & \cos\phi & -\sin\phi \\
--\sin\theta & \cos\theta\sin\phi & \cos\theta\cos\phi
+\sin\theta & \cos\theta\sin\phi & \cos\theta\cos\phi
 \end{bmatrix} \cdot
 \begin{bmatrix} v_x^{body} \\ v_y^{body} \\ 0 \end{bmatrix} \\[10pt]
 &= \begin{bmatrix}
-v_x^{body} \cos\theta + v_y^{body} \sin\theta \sin\phi \\
+v_x^{body} \cos\theta - v_y^{body} \sin\theta \sin\phi \\
 v_y^{body} \cos\phi \\
--v_x^{body} \sin\theta + v_y^{body} \cos\theta \sin\phi
+v_x^{body} \sin\theta + v_y^{body} \cos\theta \sin\phi
 \end{bmatrix}
 \end{aligned}
 \]
@@ -186,7 +188,7 @@ v_y^{body} \cos\phi \\
 \[
 \boxed{
 \begin{aligned}
-v_x^{horiz} &= v_x^{body} \cos\theta + v_y^{body} \sin\theta \sin\phi \\[4pt]
+v_x^{horiz} &= v_x^{body} \cos\theta - v_y^{body} \sin\theta \sin\phi \\[4pt]
 v_y^{horiz} &= v_y^{body} \cos\phi
 \end{aligned}}
 \]
@@ -244,7 +246,7 @@ v_x^{horiz} = v_x^{body}, \quad v_y^{horiz} = v_y^{body} \cos\phi
 
 ### 6.4 同时存在俯仰和横滚
 
-交叉耦合项 \(v_y^{body} \sin\theta \sin\phi\) 出现在 \(v_x^{horiz}\) 中，物理含义是：
+交叉耦合项 \(-v_y^{body} \sin\theta \sin\phi\) 出现在 \(v_x^{horiz}\) 中，物理含义是：
 
 > 当机器人既有俯仰又有横滚时，侧向运动在水平面上会产生一个前向分量。
 
@@ -440,7 +442,7 @@ R_z(-\psi_{PR}) \cdot \begin{bmatrix} v_x^{field} \\ v_y^{field} \end{bmatrix}
 
 \[
 \begin{aligned}
-v_x^{horiz} &= v_x^{body} \cos\theta + v_y^{body} \sin\theta \sin\phi \\
+v_x^{horiz} &= v_x^{body} \cos\theta - v_y^{body} \sin\theta \sin\phi \\
 v_y^{horiz} &= v_y^{body} \cos\phi
 \end{aligned}
 \]

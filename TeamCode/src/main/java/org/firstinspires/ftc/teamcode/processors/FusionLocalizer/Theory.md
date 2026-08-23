@@ -24,6 +24,8 @@
 
 > 所有定位器类 (`EKFLocalizer`, `AdaptiveEKFLocalizer`, `UKFLocalizer`, `AdaptiveUKFLocalizer`) 均支持 D2/D3 模式切换。EKF 和 UKF 的 API 完全兼容，可即插即用替换。
 
+> **D3 斜坡补偿符号约定**：D3 模式的速度投影采用 pitch 前仰为正、roll 左侧抬起为正，交叉项符号为**负号**（`v_x^{horiz} = v_x^{body}·cosθ - v_y^{body}·sinθ·sinφ`）。完整推导见 [`D3Localizer/Theory.md`](../D3Localizer/Theory.md)。
+
 ---
 
 ## 1. 系统架构

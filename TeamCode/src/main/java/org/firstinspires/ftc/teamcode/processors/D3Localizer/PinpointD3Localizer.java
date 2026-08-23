@@ -185,14 +185,14 @@ public class PinpointD3Localizer implements Localizer {
 
         // ---- 4. 斜坡补偿：体坐标系速度投影到水平面 ----
         // 公式来源: Theory.md §5.2
-        //   v_x^{horiz} = v_x·cos(θ) + v_y·sin(θ)·sin(φ)
+        //   v_x^{horiz} = v_x·cos(θ) - v_y·sin(θ)·sin(φ)
         //   v_y^{horiz} = v_y·cos(φ)
         double cosPitch = Math.cos(pitch);
         double sinPitch = Math.sin(pitch);
         double sinRoll  = Math.sin(roll);
         double cosRoll  = Math.cos(roll);
 
-        double vxHoriz = vxBody * cosPitch + vyBody * sinPitch * sinRoll;
+        double vxHoriz = vxBody * cosPitch - vyBody * sinPitch * sinRoll;
         double vyHoriz = vyBody * cosRoll;
 
         // ---- 5. 水平面体坐标系 → 场地坐标系 (用于位姿积分) ----
