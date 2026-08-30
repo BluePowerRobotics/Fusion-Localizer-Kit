@@ -167,7 +167,8 @@ public class MT1Localizer implements Localizer {
      * @return 位姿的标准偏差 {@code double[6] = {x, y, z, roll, pitch, yaw}} (米/度)
      */
     public double[] getStdDevs() {
-        return stdDevs;
+        // 返回副本, 避免调用方直接改写内部状态
+        return stdDevs.clone();
     }
 
     // ==================== 不确定度 ====================

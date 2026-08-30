@@ -42,6 +42,7 @@ public class AdaptQtest extends LinearOpMode {
     private double lastPitchRate = 0;
     private double lastRollRate = 0;
     private double lastYawRate = 0;
+    private boolean ratesInitialized = false;
 
     // D2: 角加速度 → Q boost
     private double qAccelX = 1.0;
@@ -99,6 +100,13 @@ public class AdaptQtest extends LinearOpMode {
                 rollRate  = angVel.yRotationRate;
                 yawRate   = angVel.zRotationRate;
 
+                if (!ratesInitialized) {
+                    // 首帧仅采样, 避免 (rate - 0) / safeDt 误触发
+                    lastPitchRate = pitchRate;
+                    lastRollRate  = rollRate;
+                    lastYawRate   = yawRate;
+                    ratesInitialized = true;
+                } else {
                 // ---- 角加速度 ----
                 pitchAccel = (pitchRate - lastPitchRate) / safeDt;
                 rollAccel  = (rollRate  - lastRollRate)  / safeDt;
@@ -129,6 +137,7 @@ public class AdaptQtest extends LinearOpMode {
                 lastPitchRate = pitchRate;
                 lastRollRate  = rollRate;
                 lastYawRate   = yawRate;
+                }
             }
 
             // ---- Telemetry 输出 ----

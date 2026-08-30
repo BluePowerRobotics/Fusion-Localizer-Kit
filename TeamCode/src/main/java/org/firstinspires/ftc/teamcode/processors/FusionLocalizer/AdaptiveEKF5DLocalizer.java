@@ -14,7 +14,7 @@ import org.firstinspires.ftc.robotcore.external.navigation.AngularVelocity;
 import org.firstinspires.ftc.robotcore.external.navigation.YawPitchRollAngles;
 
 import org.firstinspires.ftc.teamcode.RoadRunner.Localizer;
-import org.firstinspires.ftc.teamcode.processors.Accelerometer.dfRobotAccelerometer;
+import org.firstinspires.ftc.teamcode.processors.Accelerometer.Rev9axisIMU;
 import org.firstinspires.ftc.teamcode.processors.D3Localizer.PinpointD3Localizer;
 import org.firstinspires.ftc.teamcode.processors.VisionLocalizer.MT1Localizer;
 import org.firstinspires.ftc.teamcode.utility.filter.EKF.EKF5D;
@@ -24,8 +24,8 @@ import org.firstinspires.ftc.teamcode.utility.filter.EKF.EKF5D;
  *
  * <p>本定位器实现 {@code Theory5D.md} 所述的升级方案：
  * <ol>
- *   <li><b>外接加速度计</b> ({@link dfRobotAccelerometer}) 作为 <b>控制输入</b>，
- *       提供体坐标系加速度（硬件输出含重力，此处已做重力剔除）；</li>
+ *   <li><b>外接加速度计</b> ({@link Rev9axisIMU}) 作为 <b>控制输入</b>，
+ *       提供体坐标系线性加速度（BNO055 融合模式已剔除重力）；</li>
  *   <li><b>Pinpoint 里程计</b> ({@link PinpointD3Localizer}) 作为 <b>速度/航向观测</b>（体坐标系）；</li>
  *   <li><b>Limelight MegaTag1</b> ({@link MT1Localizer}) 作为 <b>低频绝对位置观测</b>；</li>
  *   <li><b>自适应 R\_pinpoint</b>：按 {@code |az| + 角速度 / yaw 角加速度} 动态放大
@@ -42,10 +42,8 @@ public class AdaptiveEKF5DLocalizer implements Localizer {
     private final PinpointD3Localizer odom;
     private final MT1Localizer mt1;
     private final IMU hubImu;
-    /** 外置加速度计 (dfRobot LIS2DW12) */
-    private final dfRobotAccelerometer accel;
-    /** 加速度计是否成功初始化 */
-    private final boolean accelReady;
+    /** 外置加速度计 (BNO055 封装，融合模式读出线性加速度，已剔除重力) */
+    private final Rev9axisIMU accel;
 
     // ---- 时间基准 ----
     private double lastTimestamp = 0;
@@ -59,11 +57,10 @@ public class AdaptiveEKF5DLocalizer implements Localizer {
     private double rBoostTheta = 1.0;
     /** 上一帧 yaw 角速度 (rad/s)，用于计算 yaw 角加速度 */
     private double lastYawRate = 0;
+    /** 是否已采样首帧 yaw 角速度 (防止首帧 (yawRate - 0) / dt 误触发 R 提升) */
+    private boolean ratesInitialized = false;
 
     // ---- 可调参数 (Theory5D.md §7) ----
-    /** 重力加速度 (英寸/秒²)，用于剔除重力 */
-    public static final double GRAVITY_IN_S2 = 9.80665 * 39.37007874;
-
     /** Pinpoint 速度观测噪声基值 (in²/s²) */
     public static double R_PIN_BASE = 0.1;
     /** Pinpoint 航向观测噪声基值 (rad²) */
@@ -86,13 +83,14 @@ public class AdaptiveEKF5DLocalizer implements Localizer {
     public static double STD_HIGH_ANGLE = 0.175;  // rad (≈10°)
     public static double R_MAX_SCALE = 20.0;
 
+
     // ==================== 构造 ====================
 
     /**
      * @param hardwareMap     硬件映射
      * @param limelight       已启动的 Limelight3A 实例
      * @param imuDeviceName   Hub IMU 设备名 (如 "imu")
-     * @param accelDeviceName 外置加速度计 I2C 设备名 (如 "accel")
+     * @param accelDeviceName 外置 BNO055 设备名 (如 "accel"，配置为 BNO055IMU 类型)
      * @param initialPose     初始位姿 (x, y, heading)
      */
     public AdaptiveEKF5DLocalizer(HardwareMap hardwareMap, Limelight3A limelight,
@@ -103,10 +101,12 @@ public class AdaptiveEKF5DLocalizer implements Localizer {
         this.mt1 = new MT1Localizer(limelight);
         this.hubImu = hardwareMap.get(IMU.class, imuDeviceName);
 
-        this.accel = new dfRobotAccelerometer(hardwareMap, accelDeviceName);
-        // 重力已占用 1g，4g 量程为动态加速度留出足够余量
-        this.accel.setRange(dfRobotAccelerometer.Range.RANGE_4G);
-        this.accelReady = this.accel.initialize();
+        // BNO055 加速度计封装（参照官方 SensorBNO055IMU 示例初始化）
+        this.accel = new Rev9axisIMU(hardwareMap, accelDeviceName);
+        this.accel.setOrientationXY(Rev9axisIMU.FacingDirection.FORWARD, Rev9axisIMU.FacingDirection.UP);
+        if (!this.accel.initialize()) {
+            android.util.Log.w("FusionLocalizer", "外置加速度计(" + accelDeviceName + ")初始化失败, 5D 滤波将以零加速度运行");
+        }
 
         this.lastTimestamp = getNow();
     }
@@ -124,16 +124,16 @@ public class AdaptiveEKF5DLocalizer implements Localizer {
         double dt = now - lastTimestamp;
         lastTimestamp = now;
 
-        // ---- 1. 外接加速度计 (体坐标系, 含重力) ----
-        double axRaw = 0, ayRaw = 0, azRaw = 0;
-        if (accelReady) {
+        // ---- 1. 外接 BNO055 加速度计 (机器人坐标系线性加速度 in/s², 融合模式已剔除重力) ----
+        double axLin = 0, ayLin = 0, azLin = 0;
+        if (accel.isConnected()) {
             accel.readAccelerometer();
-            axRaw = accel.getXAcceleration();
-            ayRaw = accel.getYAcceleration();
-            azRaw = accel.getZAcceleration();
+            axLin = accel.getXAcceleration();
+            ayLin = accel.getYAcceleration();
+            azLin = accel.getZAcceleration();
         }
 
-        // ---- 2. Hub IMU 姿态 ----
+        // ---- 2. Hub IMU 姿态 (用于加速度旋转矩阵) ----
         double pitch = 0, roll = 0;
         YawPitchRollAngles angles = hubImu.getRobotYawPitchRollAngles();
         if (angles != null) {
@@ -141,40 +141,30 @@ public class AdaptiveEKF5DLocalizer implements Localizer {
             roll = angles.getRoll(AngleUnit.RADIANS);
         }
 
-        // ---- 3. 重力剔除 (LIS2DW12 为比力输出，需减去重力投影) ----
-        // 约定: pitch θ 绕 Robot X(右) = RR 体轴 -Y；roll φ 绕 Robot Y(前) = RR 体轴 +X。
-        // 加速度计静止时读到的重力比力分量（需从测量值中减去）:
-        //   g_meas = [+G·sinθ, +G·cosθ·sinφ, +G·cosθ·cosφ]
-        double sinP = Math.sin(pitch), cosP = Math.cos(pitch);
-        double sinR = Math.sin(roll), cosR = Math.cos(roll);
-        double axLin = axRaw - GRAVITY_IN_S2 * sinP;
-        double ayLin = ayRaw - GRAVITY_IN_S2 * cosP * sinR;
-        double azLin = azRaw - GRAVITY_IN_S2 * cosP * cosR;
-
-        // ---- 4. Pinpoint 体坐标系水平速度 + 航向角速度 ----
+        // ---- 3. Pinpoint 体坐标系水平速度 + 航向角速度 ----
         lastVel = odom.update();
         double vxBody = lastVel.linearVel.x;
         double vyBody = lastVel.linearVel.y;
         double omega = lastVel.angVel;
 
-        // ---- 5. 自适应 R_pinpoint ----
+        // ---- 4. 自适应 R_pinpoint ----
         ekf.setOdomR(adaptOdomR(dt, azLin));
 
-        // ---- 6. EKF5D 预测 (加速度驱动 + 航向角速度) ----
+        // ---- 5. EKF5D 预测 (加速度驱动 + 航向角速度) ----
         ekf.predict(axLin, ayLin, azLin, pitch, roll, omega, now);
 
-        // ---- 7. Pinpoint 速度/航向观测更新 ----
+        // ---- 6. Pinpoint 速度/航向观测更新 ----
         double thetaOdom = odom.getPose().heading.toDouble();
         ekf.updateOdom(vxBody, vyBody, thetaOdom, now);
 
-        // ---- 8. 零速检测 (Theory5D.md §6.3) ----
+        // ---- 7. 零速检测 (Theory5D.md §6.3) ----
         double linAccelMag = Math.hypot(axLin, ayLin);
         double pinSpeed = Math.hypot(vxBody, vyBody);
         if (linAccelMag < ZERO_VEL_ACCEL_THRESHOLD && pinSpeed < ZERO_VEL_PINPOINT_THRESHOLD) {
             ekf.zeroVelocity();
         }
 
-        // ---- 9. MT1 视觉 → 自适应 R + 视觉更新 ----
+        // ---- 8. MT1 视觉 → 自适应 R + 视觉更新 ----
         mt1.update();
         if (mt1.isValid()) {
             ekf.setVisionR(adaptVisionR());
@@ -227,9 +217,15 @@ public class AdaptiveEKF5DLocalizer implements Localizer {
         rBoostY = updateRBoost(rBoostY, magY, 1.0);
 
         // θ (航向): yaw 角加速度
-        double yawAccel = Math.abs((yawRate - lastYawRate) / safeDt);
-        rBoostTheta = updateRBoost(rBoostTheta, yawAccel, JERK_THRESHOLD);
-        lastYawRate = yawRate;
+        if (!ratesInitialized) {
+            // 首帧仅采样, 避免 (yawRate - 0) / safeDt 误触发 R 提升
+            lastYawRate = yawRate;
+            ratesInitialized = true;
+        } else {
+            double yawAccel = Math.abs((yawRate - lastYawRate) / safeDt);
+            rBoostTheta = updateRBoost(rBoostTheta, yawAccel, JERK_THRESHOLD);
+            lastYawRate = yawRate;
+        }
 
         SimpleMatrix R = new SimpleMatrix(3, 3);
         R.set(0, 0, R_PIN_BASE * rBoostX);
@@ -293,6 +289,7 @@ public class AdaptiveEKF5DLocalizer implements Localizer {
         rBoostY = 1.0;
         rBoostTheta = 1.0;
         lastYawRate = 0;
+        ratesInitialized = false;
     }
 
     @Override
@@ -312,11 +309,11 @@ public class AdaptiveEKF5DLocalizer implements Localizer {
     /** @return 里程计定位器 (PinpointD3Localizer) */
     public PinpointD3Localizer getOdom() { return odom; }
 
-    /** @return 外置加速度计 */
-    public dfRobotAccelerometer getAccelerometer() { return accel; }
+    /** @return 外置加速度计封装 (Rev9axisIMU) */
+    public Rev9axisIMU getAccelerometer() { return accel; }
 
     /** @return 加速度计是否在线 */
-    public boolean isAccelerometerReady() { return accelReady; }
+    public boolean isAccelerometerReady() { return accel.isConnected(); }
 
     /** @return 世界坐标系速度 {Vx, Vy} (英寸/秒) */
     public double[] getVelocity() { return ekf.getVelocity(); }

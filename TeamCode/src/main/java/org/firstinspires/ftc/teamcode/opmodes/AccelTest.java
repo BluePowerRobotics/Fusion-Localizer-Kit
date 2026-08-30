@@ -6,119 +6,92 @@ import com.acmerobotics.dashboard.telemetry.MultipleTelemetry;
 import com.qualcomm.robotcore.eventloop.opmode.LinearOpMode;
 import com.qualcomm.robotcore.eventloop.opmode.TeleOp;
 
-import org.firstinspires.ftc.teamcode.processors.Accelerometer.dfRobotAccelerometer;
+import org.firstinspires.ftc.teamcode.processors.Accelerometer.Rev9axisIMU;
+import org.firstinspires.ftc.teamcode.processors.FusionLocalizer.AdaptiveEKF5DLocalizer;
+import org.firstinspires.ftc.teamcode.processors.FusionLocalizer.AdaptiveUKF5DLocalizer;
 
 /**
- * DFRobot LIS2DW12 加速度计测试 OpMode。
+ * Rev9axisIMU (BNO055) 加速度测量功能测试。
  *
- * <p>读取并显示三轴加速度（英制 inch/s² / 公制 m/s²）、原始寄存器值、
- * 传感器温度、数据就绪状态与当前量程 / 速率。
+ * <p>设备名 {@code accel}（配置为 BNO055IMU 类型）。BNO055 以融合模式 (NDOF) 运行，
+ * {@code getAcceleration()} 返回<b>已剔除重力</b>的线性加速度，可直接观察
+ * 静止时三个轴应近似为 0，缓慢移动/倾斜时对应轴出现读数。
  *
- * <h3>使用说明</h3>
- * <ol>
- *   <li>将传感器接入 Hub 的 I2C 端口，设备名配置为 {@code accel}（默认地址 0x19）</li>
- *   <li>在 FTC Dashboard 中可调整 {@code rangeG}（2/4/8/16）</li>
- *   <li>按手柄 B 键重新初始化传感器（重新软复位并校验 WHO_AM_I）</li>
- *   <li>静止时 Z 轴应约等于 1g（≈386 inch/s² 或 ≈9.81 m/s²）作为自检基准</li>
- * </ol>
+ * <p><b>用法</b>：
+ * <ul>
+ *   <li>启动即读取 {@code xFacing / yFacing}（Dashboard 可调）配置朝向并初始化；</li>
+ *   <li>按 <b>B</b> 键重新应用朝向并重新初始化（修改 Dashboard 朝向参数后生效）；</li>
+ *   <li>静置时三轴 ≈ 0，沿 +X 前进加速时 X 为正，沿 +Y 左移时 Y 为正。</li>
+ * </ul>
+ *
+ * <p>注意：+Z 轴方向由 x / y 按右手系自动推算（Z = X × Y），无需配置。
  */
 @Config
-@TeleOp(name = "Accel Test", group = "Fusion")
+@TeleOp(name = "Accel Test (BNO055)", group = "Fusion")
 public class AccelTest extends LinearOpMode {
 
-    /** 加速度计量程 (g)，支持 2 / 4 / 8 / 16 */
-    public static double rangeG = 4;
+    // ---- Dashboard 可调：本次测试的传感器朝向（仅 x / y，z 自动推算）----
+    public static Rev9axisIMU.FacingDirection xFacing = Rev9axisIMU.FacingDirection.FORWARD;
+    public static Rev9axisIMU.FacingDirection yFacing = Rev9axisIMU.FacingDirection.LEFT;
 
-    private dfRobotAccelerometer accel;
+    private Rev9axisIMU accel;
     private boolean accelReady = false;
-
-    private boolean prevBPressed = false;
 
     @Override
     public void runOpMode() throws InterruptedException {
         telemetry = new MultipleTelemetry(telemetry, FtcDashboard.getInstance().getTelemetry());
 
-        accel = new dfRobotAccelerometer(hardwareMap, "accel");
-
-        // === 朝向配置（Facing 方式，与官方 Hub IMU 风格一致）===
-        // 实际安装: 传感器 +Y 朝前、+Z 朝右、+X 朝下
-        accel.setOrientation(
-                dfRobotAccelerometer.FacingDirection.DOWN,
-                dfRobotAccelerometer.FacingDirection.FORWARD,
-                dfRobotAccelerometer.FacingDirection.RIGHT);
-        
-        accel.setRange(dfRobotAccelerometer.Range.RANGE_4G);
+        // === 初始化（设备名 "accel"，配置为 BNO055IMU 类型）===
+        accel = new Rev9axisIMU(hardwareMap, "accel");
+        accel.setOrientationXY(xFacing, yFacing);
         accelReady = accel.initialize();
+
+        telemetry.addLine("Accel Test (BNO055) Ready");
+        telemetry.addLine("Dashboard 可调: xFacing, yFacing (按 B 键生效)");
+        telemetry.update();
 
         waitForStart();
 
-        while (opModeIsActive()) {
-            // === 量程动态调整 ===
-            int requestedRange = (int) rangeG;
-            if (requestedRange != rangeToG(accel.getRange()) && isValidRange(requestedRange)) {
-                accel.setRange(requestedRange);
-            }
+        boolean prevBPressed = false;
 
-            // === 重新初始化 (B 键) ===
+        while (opModeIsActive()) {
+            // === 重新应用朝向并重新初始化 (B 键) ===
             boolean bPressed = gamepad1.b;
             if (bPressed && !prevBPressed) {
-                if (isValidRange(requestedRange)) {
-                    accel.setRange(requestedRange);
-                }
+                accel.setOrientationXY(xFacing, yFacing);
                 accelReady = accel.initialize();
             }
             prevBPressed = bPressed;
 
-            // === 读取 ===
+            // === 读取（失败时保留上一次的值）===
             if (accelReady) {
                 accel.readAccelerometer();
-
-                double ax = accel.getXAcceleration();
-                double ay = accel.getYAcceleration();
-                double az = accel.getZAcceleration();
-                double mag = Math.sqrt(ax * ax + ay * ay + az * az);
-
-                telemetry.addLine("--- Acceleration (inch/s²) ---");
-                telemetry.addData("X", String.format("%+.2f", ax));
-                telemetry.addData("Y", String.format("%+.2f", ay));
-                telemetry.addData("Z", String.format("%+.2f", az));
-                telemetry.addData("Mag", String.format("%.2f", mag));
-
-                telemetry.addLine("--- Acceleration (m/s²) ---");
-                telemetry.addData("X", String.format("%+.3f", accel.getXAccelerationMps2()));
-                telemetry.addData("Y", String.format("%+.3f", accel.getYAccelerationMps2()));
-                telemetry.addData("Z", String.format("%+.3f", accel.getZAccelerationMps2()));
-
-                telemetry.addLine("--- Raw / Status ---");
-                telemetry.addData("RawX", accel.getRawX());
-                telemetry.addData("RawY", accel.getRawY());
-                telemetry.addData("RawZ", accel.getRawZ());
-                telemetry.addData("DataReady", accel.isDataReady());
-                telemetry.addData("Temperature (°C)", String.format("%.1f", accel.getTemperatureCelsius()));
             }
 
-            telemetry.addLine("--- Config ---");
+            // === Telemetry ===
+            telemetry.addLine("--- 状态 ---");
             telemetry.addData("Initialized", accelReady);
             telemetry.addData("Connected", accel.isConnected());
-            telemetry.addData("Range (g)", accel.getRange());
-            telemetry.addData("DataRate", accel.getDataRate());
-            telemetry.addData("Press B to re-init", "");
+            telemetry.addData("Press B to re-apply orientation & re-init", "");
+
+            telemetry.addLine();
+            telemetry.addLine("--- 线性加速度 (剔除重力, inch/s²) ---");
+            telemetry.addData("X (前)", "%.4f", accel.getXAcceleration());
+            telemetry.addData("Y (左)", "%.4f", accel.getYAcceleration());
+            telemetry.addData("Z (上)", "%.4f", accel.getZAcceleration());
+
+            telemetry.addLine();
+            telemetry.addLine("--- 线性加速度 (剔除重力, m/s²) ---");
+            telemetry.addData("X (前)", "%.4f", accel.getXAccelerationMps2());
+            telemetry.addData("Y (左)", "%.4f", accel.getYAccelerationMps2());
+            telemetry.addData("Z (上)", "%.4f", accel.getZAccelerationMps2());
+
+            telemetry.addLine();
+            telemetry.addLine("--- 本测试朝向 (x/y, z 自动推算) ---");
+            telemetry.addData("xFacing", xFacing);
+            telemetry.addData("yFacing", yFacing);
 
             telemetry.update();
         }
-    }
-
-    private static int rangeToG(dfRobotAccelerometer.Range range) {
-        switch (range) {
-            case RANGE_2G:  return 2;
-            case RANGE_4G:  return 4;
-            case RANGE_8G:  return 8;
-            case RANGE_16G: return 16;
-            default:        return 4;
-        }
-    }
-
-    private static boolean isValidRange(int g) {
-        return g == 2 || g == 4 || g == 8 || g == 16;
     }
 }

@@ -433,8 +433,8 @@ public final class MecanumDrive {
         // 获取电压传感器
         voltageSensor = hardwareMap.voltageSensor.iterator().next();
 
-        // 初始化定位器
-        localizer =  new WriteInstantlyLocalizer(hardwareMap, PARAMS.inPerTick, pose);
+        // 初始化定位器（Pinpoint 里程计；构造时对共享设备执行一次 resetPosAndIMU）
+        localizer =  new PinpointLocalizer(hardwareMap, PARAMS.inPerTick, pose);
 
         // 记录参数
         FlightRecorder.write("MECANUM_PARAMS", PARAMS);

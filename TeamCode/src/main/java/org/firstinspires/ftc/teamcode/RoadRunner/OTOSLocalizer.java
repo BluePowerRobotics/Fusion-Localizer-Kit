@@ -44,6 +44,10 @@ public class OTOSLocalizer implements Localizer {
      */
     private Pose2d currentPose;
 
+    /** 最近一次下发到 OTOS 的缩放参数 (用于检测 Dashboard 变更并增量同步) */
+    private double appliedLinearScalar = Double.NaN;
+    private double appliedAngularScalar = Double.NaN;
+
     /**
      * 构造函数
      * @param hardwareMap 硬件映射
@@ -62,6 +66,8 @@ public class OTOSLocalizer implements Localizer {
         otos.setLinearScalar(PARAMS.linearScalar);
         otos.setAngularScalar(PARAMS.angularScalar);
         otos.setOffset(PARAMS.offset);
+        appliedLinearScalar = PARAMS.linearScalar;
+        appliedAngularScalar = PARAMS.angularScalar;
     }
 
     /**
@@ -93,6 +99,16 @@ public class OTOSLocalizer implements Localizer {
         SparkFunOTOS.Pose2D otosVel = new SparkFunOTOS.Pose2D();
         SparkFunOTOS.Pose2D otosAcc = new SparkFunOTOS.Pose2D();
         otos.getPosVelAcc(otosPose, otosVel, otosAcc);
+
+        // 运行时同步 Dashboard 可调的缩放参数, 使调参立即生效 (仅在变更时下发, 减少 I2C 写入)
+        if (PARAMS.linearScalar != appliedLinearScalar) {
+            otos.setLinearScalar(PARAMS.linearScalar);
+            appliedLinearScalar = PARAMS.linearScalar;
+        }
+        if (PARAMS.angularScalar != appliedAngularScalar) {
+            otos.setAngularScalar(PARAMS.angularScalar);
+            appliedAngularScalar = PARAMS.angularScalar;
+        }
 
         currentPose = OTOSKt.toRRPose(otosPose);
         Vector2d fieldVel = new Vector2d(otosVel.x, otosVel.y);

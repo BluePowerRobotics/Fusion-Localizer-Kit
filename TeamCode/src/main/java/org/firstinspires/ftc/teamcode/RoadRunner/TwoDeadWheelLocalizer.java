@@ -171,8 +171,9 @@ public final class TwoDeadWheelLocalizer implements Localizer {
         Rotation2d heading = Rotation2d.exp(angles.getYaw(AngleUnit.RADIANS));
 
         // 处理角度环绕问题，参考 https://github.com/FIRST-Tech-Challenge/FtcRobotController/issues/617
+        // 首帧 (未初始化) 仅记录上一帧角速度, 避免 |rawHeadingVel - 0| > π 时误加 ±2π 偏移
         double rawHeadingVel = angularVelocity.zRotationRate;
-        if (Math.abs(rawHeadingVel - lastRawHeadingVel) > Math.PI) {
+        if (initialized && Math.abs(rawHeadingVel - lastRawHeadingVel) > Math.PI) {
             headingVelOffset -= Math.signum(rawHeadingVel) * 2 * Math.PI;
         }
         lastRawHeadingVel = rawHeadingVel;

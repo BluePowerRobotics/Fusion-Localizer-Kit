@@ -67,6 +67,8 @@ public class AdaptiveUKFLocalizer implements Localizer {
     private double lastPitchRate = 0;
     /** 上一帧 yaw 角速度 (rad/s) — 绕 body Z 轴 (垂直) */
     private double lastYawRate = 0;
+    /** 是否已采样首帧角速度 (防止首帧 (rate - 0) / dt 误触发 Q 提升) */
+    private boolean ratesInitialized = false;
 
     /** Q 基值 (in²/s) */
     public static double qBase = 0.002;
@@ -236,6 +238,13 @@ public class AdaptiveUKFLocalizer implements Localizer {
                 double rollRate  = angVel.yRotationRate;
                 double yawRate   = angVel.zRotationRate;  // 仅用于角速度变化率检测, 非绝对值
 
+                if (!ratesInitialized) {
+                    // 首帧仅采样上次角速度, 避免 (rate - 0) / dt 产生虚假的大角加速度并误触发 Q 提升
+                    lastPitchRate = pitchRate;
+                    lastRollRate  = rollRate;
+                    lastYawRate   = yawRate;
+                    ratesInitialized = true;
+                } else {
                 // ---- pitch/roll 角加速度 (冲击) ----
                 double pitchAccel = (pitchRate - lastPitchRate) / safeDt;
                 double rollAccel  = (rollRate  - lastRollRate)  / safeDt;
@@ -276,6 +285,7 @@ public class AdaptiveUKFLocalizer implements Localizer {
                 lastPitchRate = pitchRate;
                 lastRollRate  = rollRate;
                 lastYawRate   = yawRate;
+                }
             }
         }
 
@@ -393,6 +403,7 @@ public class AdaptiveUKFLocalizer implements Localizer {
         lastPitchRate = 0;
         lastRollRate = 0;
         lastYawRate = 0;
+        ratesInitialized = false;
     }
 
     // ==================== 输出 ====================
@@ -436,6 +447,7 @@ public class AdaptiveUKFLocalizer implements Localizer {
         lastPitchRate = 0;
         lastRollRate = 0;
         lastYawRate = 0;
+        ratesInitialized = false;
     }
 
     // ==================== 内部工具 ====================

@@ -118,9 +118,6 @@ public class Vector2D {
     public static double dot(Vector2D p1, Vector2D p2) {
         return p1.x * p2.x + p1.y * p2.y;
     }
-    public static Vector2D cross(Vector2D p1, Vector2D p2) {
-        return new Vector2D(p1.x * p2.y - p1.y * p2.x, p1.y * p2.x - p1.x * p2.y);
-    }
     public static Vector3D toPoint3D(Vector2D p, Vector3D planeNormal, Vector3D planePoint) {
         Vector3D unitNormal = Vector3D.normalize(planeNormal);
 
@@ -185,6 +182,6 @@ public class Vector2D {
         while (angle <= -Math.PI) {
             angle += 2 * Math.PI;
         }
-        return fromPolar(angle,1).getRadian();
+        return angle;
     }
 }

@@ -28,6 +28,13 @@ public class Projector {
     }
 
     public Vector3D project(double x_p, double y_p, double k) {
+        // 除零保护: k / l0 为 0 时投影无意义, 快速失败并给出可读信息
+        if (k == 0) {
+            throw new IllegalArgumentException("k (焦距参数) 不能为 0");
+        }
+        if (l0 == 0) {
+            throw new IllegalArgumentException("l0 (投影距离) 不能为 0");
+        }
         double d = 1.0 / k;
         double A = 1.0 / (k * l0);
 

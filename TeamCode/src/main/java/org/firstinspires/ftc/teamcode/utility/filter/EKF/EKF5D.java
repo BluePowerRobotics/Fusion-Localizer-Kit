@@ -263,7 +263,7 @@ public class EKF5D {
         SimpleMatrix S = H.mult(P).mult(H.transpose()).plus(odomR);
 
         // ---- K = P·Hᵀ·S⁻¹ ----
-        SimpleMatrix K = P.mult(H.transpose()).mult(S.invert());
+        SimpleMatrix K = P.mult(H.transpose()).mult(safeInvert(S));
 
         // ---- 状态更新 ----
         state = state.plus(K.mult(innov));
@@ -306,7 +306,7 @@ public class EKF5D {
         innov.set(2, 0, normalizeAngle(innov.get(2, 0)));
 
         SimpleMatrix S = H.mult(P).mult(H.transpose()).plus(visionR);
-        SimpleMatrix K = P.mult(H.transpose()).mult(S.invert());
+        SimpleMatrix K = P.mult(H.transpose()).mult(safeInvert(S));
 
         state = state.plus(K.mult(innov));
         state.set(IDX_THETA, 0, normalizeAngle(state.get(IDX_THETA, 0)));
@@ -318,12 +318,30 @@ public class EKF5D {
     // ==================== 零速检测辅助 ====================
 
     /**
+     * 安全求逆 —— S = H·P·Hᵀ + R 在 R 配置过小或数值退化时可能奇异。
+     * 求逆失败时对角加扰动 (jitter) 后重试, 避免抛出异常或产生爆炸增益。
+     */
+    private SimpleMatrix safeInvert(SimpleMatrix m) {
+        try {
+            return m.invert();
+        } catch (RuntimeException e) {
+            SimpleMatrix jittered = m.plus(SimpleMatrix.identity(m.numRows()).scale(1e-9));
+            return jittered.invert();
+        }
+    }
+
+    /**
      * 将速度状态 Vx, Vy 强制置零 (Theory5D.md §6.3)。
      * 由外部零速检测逻辑在机器人静止时调用，防止加速度积分漂移。
      */
     public void zeroVelocity() {
         state.set(IDX_VX, 0, 0);
         state.set(IDX_VY, 0, 0);
+        // 同步收缩速度协方差, 避免零速状态下不确定度仍按原值传播
+        P.set(IDX_VX, IDX_VX, 0.01);
+        P.set(IDX_VY, IDX_VY, 0.01);
+        P.set(IDX_VX, IDX_VY, 0);
+        P.set(IDX_VY, IDX_VX, 0);
     }
 
     // ==================== 输出 ====================

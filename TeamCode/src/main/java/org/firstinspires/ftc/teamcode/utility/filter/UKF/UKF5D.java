@@ -204,7 +204,7 @@ public class UKF5D {
         SimpleMatrix S = covariance(zSigma, zMean).plus(odomR);
         SimpleMatrix Pxz = crossCovariance(sigma, state, zSigma, zMean);
 
-        SimpleMatrix K = Pxz.mult(S.invert());
+        SimpleMatrix K = Pxz.mult(safeInvert(S));
 
         state = state.plus(K.mult(innov));
         state.set(IDX_THETA, 0, normalizeAngle(state.get(IDX_THETA, 0)));
@@ -239,7 +239,7 @@ public class UKF5D {
         SimpleMatrix S = covariance(zSigma, zMean).plus(visionR);
         SimpleMatrix Pxz = crossCovariance(sigma, state, zSigma, zMean);
 
-        SimpleMatrix K = Pxz.mult(S.invert());
+        SimpleMatrix K = Pxz.mult(safeInvert(S));
 
         state = state.plus(K.mult(innov));
         state.set(IDX_THETA, 0, normalizeAngle(state.get(IDX_THETA, 0)));
@@ -479,5 +479,18 @@ public class UKF5D {
         while (angle > Math.PI) angle -= 2.0 * Math.PI;
         while (angle < -Math.PI) angle += 2.0 * Math.PI;
         return angle;
+    }
+
+    /**
+     * 安全求逆 —— S = Pzz + R 在 R 配置过小或数值退化时可能奇异。
+     * 求逆失败时对角加扰动 (jitter) 后重试, 避免抛出异常或产生爆炸增益。
+     */
+    private SimpleMatrix safeInvert(SimpleMatrix m) {
+        try {
+            return m.invert();
+        } catch (RuntimeException e) {
+            SimpleMatrix jittered = m.plus(SimpleMatrix.identity(m.numRows()).scale(1e-9));
+            return jittered.invert();
+        }
     }
 }

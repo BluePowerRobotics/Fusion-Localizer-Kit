@@ -21,9 +21,9 @@ public class Chassis {
     public final MecanumDrive mecanumDrive;
 
     /** 最大线速度 (inch/s) */
-    private double maxV;
+    private double maxV = 50.0;
     /** 最大角速度 (rad/s) */
-    private double maxOmega;
+    private double maxOmega = Math.PI;
 
     /**
      * @param hardwareMap 硬件映射

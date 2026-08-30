@@ -158,25 +158,34 @@ public final class ThreeDeadWheelLocalizer implements Localizer {
         int par1PosDelta = par1PosVel.position - lastPar1Pos;
         int perpPosDelta = perpPosVel.position - lastPerpPos;
 
+        // 三角测量需要两平行轮间距非零；若间距≈0 (Dashboard 误配置) 则跳过本帧, 避免除零产生 Inf/NaN
+        double parSep = PARAMS.par0YTicks - PARAMS.par1YTicks;
+        if (Math.abs(parSep) < 1e-9) {
+            lastPar0Pos = par0PosVel.position;
+            lastPar1Pos = par1PosVel.position;
+            lastPerpPos = perpPosVel.position;
+            return new PoseVelocity2d(new Vector2d(0.0, 0.0), 0.0);
+        }
+
         // 计算机器人运动增量
         // 使用三角测量原理计算 x、y 位移和旋转角度
         Twist2dDual<Time> twist = new Twist2dDual<>(
                 new Vector2dDual<>(
                         // x 方向位移和速度
                         new DualNum<Time>(new double[] {
-                                (PARAMS.par0YTicks * par1PosDelta - PARAMS.par1YTicks * par0PosDelta) / (PARAMS.par0YTicks - PARAMS.par1YTicks),
-                                (PARAMS.par0YTicks * par1PosVel.velocity - PARAMS.par1YTicks * par0PosVel.velocity) / (PARAMS.par0YTicks - PARAMS.par1YTicks),
+                                (PARAMS.par0YTicks * par1PosDelta - PARAMS.par1YTicks * par0PosDelta) / (parSep),
+                                (PARAMS.par0YTicks * par1PosVel.velocity - PARAMS.par1YTicks * par0PosVel.velocity) / (parSep),
                         }).times(inPerTick),
                         // y 方向位移和速度
                         new DualNum<Time>(new double[] {
-                                (PARAMS.perpXTicks / (PARAMS.par0YTicks - PARAMS.par1YTicks) * (par1PosDelta - par0PosDelta) + perpPosDelta),
-                                (PARAMS.perpXTicks / (PARAMS.par0YTicks - PARAMS.par1YTicks) * (par1PosVel.velocity - par0PosVel.velocity) + perpPosVel.velocity),
+                                (PARAMS.perpXTicks / (parSep) * (par1PosDelta - par0PosDelta) + perpPosDelta),
+                                (PARAMS.perpXTicks / (parSep) * (par1PosVel.velocity - par0PosVel.velocity) + perpPosVel.velocity),
                         }).times(inPerTick)
                 ),
                 // 旋转角度和角速度
                 new DualNum<>(new double[] {
-                        (par0PosDelta - par1PosDelta) / (PARAMS.par0YTicks - PARAMS.par1YTicks),
-                        (par0PosVel.velocity - par1PosVel.velocity) / (PARAMS.par0YTicks - PARAMS.par1YTicks),
+                        (par0PosDelta - par1PosDelta) / (parSep),
+                        (par0PosVel.velocity - par1PosVel.velocity) / (parSep),
                 })
         );
 

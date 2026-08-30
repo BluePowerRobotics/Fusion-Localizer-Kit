@@ -163,7 +163,7 @@ public class EKF {
         SimpleMatrix S = H.mult(P).mult(H.transpose()).plus(R);
 
         // ---- 4. 卡尔曼增益 K = P * H^T * S^{-1} ----
-        SimpleMatrix K = P.mult(H.transpose()).mult(S.invert());
+        SimpleMatrix K = P.mult(H.transpose()).mult(safeInvert(S));
 
         // ---- 5. 状态更新 x = x + K * y_innov ----
         state = state.plus(K.mult(yInnov));
@@ -277,5 +277,18 @@ public class EKF {
         while (angle > Math.PI)  angle -= 2.0 * Math.PI;
         while (angle < -Math.PI) angle += 2.0 * Math.PI;
         return angle;
+    }
+
+    /**
+     * 安全求逆 —— S = H·P·Hᵀ + R 在 R 配置过小或数值退化时可能奇异。
+     * 求逆失败时对角加扰动 (jitter) 后重试, 避免抛出异常或产生爆炸增益。
+     */
+    private SimpleMatrix safeInvert(SimpleMatrix m) {
+        try {
+            return m.invert();
+        } catch (RuntimeException e) {
+            SimpleMatrix jittered = m.plus(SimpleMatrix.identity(m.numRows()).scale(1e-9));
+            return jittered.invert();
+        }
     }
 }
