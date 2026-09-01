@@ -115,7 +115,14 @@ ay_w = A·sinψ + B·cosψ
 
 ## 5. 自适应 R\_pinpoint 逻辑
 
-原版使用 IMU 角速度/角加速度自适应 Q。新版本改为 **自适应 Pinpoint 速度观测噪声 R**，判定信号使用 **竖直加速度** 与 **对应方向角速度** 的组合。
+原版使用 IMU 角速度/角加速度自适应 Q。新版本改为 **自适应 Pinpoint 速度观测噪声 R**。
+
+> **两种实现变体**：本方案现有 D3（默认）与 D2（简化）两种 R_pin 判定方式，二者仅在「Pinpoint 速度观测不可靠」的判据上不同，加速度预测、Q 固定、视觉 R 逻辑完全相同：
+>
+> | 变体 | 实现类 (EKF / UKF) | 里程计 | R_pin 判据 |
+> | --- | --- | --- | --- |
+> | D3（默认） | `AdaptiveEKF5DLocalizer` / `AdaptiveUKF5DLocalizer` | `PinpointD3Localizer`（3D 斜坡补偿） | `\|az\|` + 角速度（§5.1–§5.3） |
+> | D2（简化） | `AdaptiveEKF5DLocalizer_D2` / `AdaptiveUKF5DLocalizer_D2` | `PinpointLocalizer`（标准 2D） | pitch/roll 倾角（§5.4，yaw 例外仍用角加速度） |
 
 ### 5.1 判定信号设计
 
@@ -146,6 +153,27 @@ R_pinpoint[i] = R_base[i] × R_boost[i]
 
 - **竖直加速度** **`az`** 反映机器人是否处于非支撑状态（飞坡、颠簸）或受到垂向冲击，这些时刻 Pinpoint 轮子可能打滑或离地，速度不可靠。
 - **角速度** **`pitchRate/rollRate`** 反映坡度变化，与 `az` 结合可区分“斜坡行驶”（角速度大但 `az` 接近 0）和“飞坡”（角速度大且 `az` 偏离 0），避免在正常斜坡上错误放大 R。
+
+***
+
+### 5.4 D2 简化模式的判定（仅用角度）
+
+D2 模式面向标准 2D 底盘与相对平坦的场地，用更简单的判据取代 D3 的「竖直加速度 + 角速度」组合：
+
+| 方向 | 判定信号 | 阈值 | 物理含义 |
+| --- | --- | --- | --- |
+| X（前后速度） | `|pitch|` | `ANGLE_THRESHOLD` (≈0.15 rad ≈ 8.6°) | 机身前后倾角大 → 前后速度观测不可靠 |
+| Y（左右速度） | `|roll|` | `ANGLE_THRESHOLD` | 机身左右倾角大 → 左右速度观测不可靠 |
+| θ（航向） | yaw 角加速度 | `JERK_THRESHOLD` | 旋转冲击（与 D3 一致的例外项） |
+
+即「仅用角度判定，yaw 除外仍用角加速度」。放大/衰减规则与 §5.2 的 `updateRBoost` 完全一致：
+
+```
+if |pitch| > ANGLE_THRESHOLD:  rBoostX 增大
+if |roll|  > ANGLE_THRESHOLD:  rBoostY 增大
+```
+
+与 D3 相比，D2 不再使用 `AZ_THRESHOLD` / `ANGULAR_VEL_THRESHOLD`，也无需 `PinpointD3Localizer` 的斜坡补偿投影，适用场景更简单、调参更少。
 
 ***
 
@@ -207,6 +235,11 @@ Vy' = Vy + ay_w·dt
 | `R_DECAY`                     | R boost 衰减系数       | 0.85         | 自适应 R |
 | `ZERO_VEL_ACCEL_THRESHOLD`    | 零速检测加速度阈值          | 0.5 in/s²    | 零速检测  |
 | `ZERO_VEL_PINPOINT_THRESHOLD` | 零速检测速度阈值           | 0.5 in/s     | 零速检测  |
+
+> **D2/D3 专属参数补充**：
+> - `AZ_THRESHOLD`、`ANGULAR_VEL_THRESHOLD` 仅 D3 使用；
+> - `ANGLE_THRESHOLD`（默认 0.15 rad ≈ 8.6°）为 D2 专用，替代上述两阈值；
+> - `JERK_THRESHOLD`、`R_PIN_BASE`、`R_PIN_THETA_BASE`、`R_BOOST_MAX`、`R_DECAY` 以及零速检测阈值为 D2/D3 共用。
 
 ***
 

@@ -22,6 +22,7 @@ import org.firstinspires.ftc.teamcode.processors.FusionLocalizer.EKFLocalizer;
 import org.firstinspires.ftc.teamcode.processors.FusionLocalizer.UKFLocalizer;
 import org.firstinspires.ftc.teamcode.processors.VisionLocalizer.MT1Localizer;
 
+import java.util.ArrayList;
 import java.util.LinkedList;
 import java.util.List;
 
@@ -82,6 +83,9 @@ public class FusionTestOpMode extends LinearOpMode {
     private final List<Pose2d> adaptiveUkfHistory = new LinkedList<>();
     private static final int MAX_HISTORY = 80;
 
+    /** 开始后校准阶段的记录时长 (毫秒) */
+    private static int CALIB_DURATION_MS = 2000;
+
     @Override
     public void runOpMode() throws InterruptedException {
         telemetry = new MultipleTelemetry(telemetry, FtcDashboard.getInstance().getTelemetry());
@@ -104,6 +108,18 @@ public class FusionTestOpMode extends LinearOpMode {
         MecanumDrive drive = new MecanumDrive(hardwareMap, initialPose);
 
         waitForStart();
+
+        // ---- 开始后校准：按 A 记录 MT1 位姿并取均值，作为起始位姿 ----
+        Pose2d calibratedPose = calibrateViaVision(mt1);
+        pinpoint.setPose(calibratedPose);
+        ekf.setPose(calibratedPose);
+        adaptiveEkf.setPose(calibratedPose);
+        ukf.setPose(calibratedPose);
+        adaptiveUkf.setPose(calibratedPose);
+        drive.localizer.setPose(calibratedPose);
+
+        telemetry.addLine("Calibration done, driving enabled");
+        telemetry.update();
 
         // ---- 主循环 ----
         while (opModeIsActive()) {
@@ -294,6 +310,83 @@ public class FusionTestOpMode extends LinearOpMode {
 
             FtcDashboard.getInstance().sendTelemetryPacket(packet);
         }
+    }
+
+    // ==================== 开始后校准 ====================
+
+    /**
+     * 通过 MT1 视觉定位记录起始位姿：按下 A 后采集一段时间内的有效位姿，
+     * 返回均值作为校准结果（位置算术平均，朝向圆周平均）。
+     */
+    private Pose2d calibrateViaVision(MT1Localizer mt1) {
+        telemetry.addLine("Calibration: press A to record start pose (MT1)");
+        telemetry.update();
+
+        boolean prevA = false;
+        boolean isRecording = false;
+        long recordingStartMs = 0;
+        List<Pose2d> samples = new ArrayList<>();
+
+        while (opModeIsActive()) {
+            mt1.update();
+            Pose2d pose = mt1.getPose();
+
+            telemetry.addLine("--- Calibration (MT1) ---");
+            if (mt1.isValid()) {
+                telemetry.addData("X (in)", "%.2f", pose.position.x);
+                telemetry.addData("Y (in)", "%.2f", pose.position.y);
+                telemetry.addData("Heading (deg)", "%.2f", Math.toDegrees(pose.heading.toDouble()));
+            } else {
+                telemetry.addLine("No valid pose");
+            }
+            telemetry.addData("Tag Count", mt1.getTagCount());
+            telemetry.addData("Ambiguity (m)", "%.4f", mt1.getAmbiguity());
+
+            boolean a = gamepad1.a;
+            if (a && !prevA && !isRecording) {
+                isRecording = true;
+                recordingStartMs = System.currentTimeMillis();
+                samples.clear();
+            }
+            prevA = a;
+
+            if (isRecording) {
+                if (mt1.isValid()) {
+                    samples.add(pose);
+                }
+                if (System.currentTimeMillis() - recordingStartMs >= CALIB_DURATION_MS) {
+                    isRecording = false;
+                    if (!samples.isEmpty()) {
+                        return computeMeanPose(samples);
+                    }
+                    telemetry.addLine("No valid samples, press A to retry");
+                }
+            }
+
+            telemetry.addLine();
+            telemetry.addData("Recording", isRecording ? "Active" : "Inactive");
+            if (isRecording) {
+                telemetry.addData("Time remaining (ms)",
+                        CALIB_DURATION_MS - (System.currentTimeMillis() - recordingStartMs));
+                telemetry.addData("Samples", samples.size());
+            }
+            telemetry.update();
+        }
+        // OpMode 停止时才执行到这里
+        return new Pose2d(0, 0, 0);
+    }
+
+    /** 位置算术平均，朝向圆周平均。 */
+    private static Pose2d computeMeanPose(List<Pose2d> samples) {
+        double sumX = 0, sumY = 0;
+        double sumSin = 0, sumCos = 0;
+        for (Pose2d p : samples) {
+            sumX += p.position.x;
+            sumY += p.position.y;
+            sumSin += Math.sin(p.heading.toDouble());
+            sumCos += Math.cos(p.heading.toDouble());
+        }
+        return new Pose2d(sumX / samples.size(), sumY / samples.size(), Math.atan2(sumSin, sumCos));
     }
 
     // ==================== 误差计算 ====================
