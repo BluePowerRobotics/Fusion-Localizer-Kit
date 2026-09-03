@@ -174,6 +174,34 @@ public class EKF {
         P = I.minus(K.mult(H)).mult(P);
     }
 
+    /**
+     * 视觉观测门控 —— 计算马氏距离 (Mahalanobis distance) 判断该视觉观测是否为离群点。
+     *
+     * <p>观测模型 H = I，因此新息 {@code y = z - x̂}，新息协方差 {@code S = P + R}。
+     * 当机器人远离 AprilTag 时视觉误差极大，直接用其更新会将滤波器带偏；
+     * 通过马氏距离门控可拒绝这类离群观测。
+     *
+     * @param xMeas         视觉全局 x (英寸)
+     * @param yMeas         视觉全局 y (英寸)
+     * @param thetaMeas     视觉全局朝向 (弧度)
+     * @param gateThreshold 马氏距离门控阈值 (无量纲)
+     * @return true 表示测量可接受 (马氏距离 ≤ gateThreshold)
+     */
+    public boolean gateVision(double xMeas, double yMeas, double thetaMeas, double gateThreshold) {
+        SimpleMatrix z = new SimpleMatrix(new double[][]{
+                {xMeas},
+                {yMeas},
+                {thetaMeas}
+        });
+        SimpleMatrix innov = z.minus(state);
+        innov.set(2, 0, normalizeAngle(innov.get(2, 0)));
+
+        // H = I → S = P + R
+        SimpleMatrix S = P.plus(R);
+        SimpleMatrix d2 = innov.transpose().mult(safeInvert(S)).mult(innov);
+        return d2.get(0, 0) <= gateThreshold * gateThreshold;
+    }
+
     // ==================== 输出 ====================
 
     /**

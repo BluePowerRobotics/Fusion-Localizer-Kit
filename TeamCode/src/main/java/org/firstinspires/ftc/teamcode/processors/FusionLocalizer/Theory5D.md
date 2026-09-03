@@ -126,11 +126,11 @@ ay_w = A·sinψ + B·cosψ
 
 ### 5.1 判定信号设计
 
-| 方向        | 传感器信号 | 物理含义     | 阈值       | <br />    | <br />           | <br />           | <br />                                   |
-| --------- | ----- | -------- | -------- | :-------- | :--------------- | :--------------- | :--------------------------------------- |
-| **X**（前后） | \`    | az       | `与`      | pitchRate | \` 组合            | 竖直加速度变化 + 前后倾斜速率 | `AZ_THRESHOLD` + `ANGULAR_VEL_THRESHOLD` |
-| **Y**（左右） | \`    | az       | `与`      | rollRate  | \` 组合            | 竖直加速度变化 + 左右倾斜速率 | 同上                                       |
-| **θ**（航向） | \`    | yawAccel | \`（角加速度） | 旋转冲击      | `JERK_THRESHOLD` | <br />           | <br />                                   |
+| 方向 | 判定信号 | 物理含义 | 阈值 |
+| --- | --- | --- | --- |
+| X（前后速度） | `|az|` + `|pitchRate|` 组合 | 竖直加速度 + 前后倾斜速率 | `AZ_THRESHOLD` + `ANGULAR_VEL_THRESHOLD` |
+| Y（左右速度） | `|az|` + `|rollRate|` 组合 | 竖直加速度 + 左右倾斜速率 | 同上 |
+| θ（航向） | `|yawAccel|`（角加速度） | 旋转冲击 | `JERK_THRESHOLD` |
 
 **组合方式**：将 `az` 的绝对值与对应轴角速度的绝对值**加权求和**（或取最大值），作为有效幅值。当幅值超过阈值时，增大对应方向的 R\_pinpoint，表示 Pinpoint 速度观测不可信，滤波器更依赖加速度积分。
 
@@ -217,6 +217,28 @@ Vy' = Vy + ay_w·dt
 
 则强制将速度状态 `Vx, Vy` 重置为 0，防止静止时加速度积分漂移。
 
+### 6.4 视觉观测噪声 R_vision 与马氏门控（9/2 改进）
+
+原本 Limelight 位置观测噪声 R_vision 仅由 MT1 stdDev 做三段式映射，且在 `STD_HIGH` 处截断上界。9/2 实验发现：远离 AprilTag 时视觉解误差极大，直接用其更新会把滤波器带偏。改进如下（所有定位器变体共用）：
+
+1. **去除上界**：`mapStdToR` 改为无上界线性映射——超过高阈值后继续线性放大，不再截断在 `R_MAX_SCALE`：
+
+   ```
+   R = std <= LOW ? 0.01 : 0.01 × (1 + t × (R_MAX_SCALE - 1)),  t = (std - LOW)/(HIGH - LOW)
+   ```
+
+2. **距离二次缩放**：位置 R 乘以 `computeDistFactor()`，当 `mt1.getAvgDist() > DIST_REF_M` 时按 `(dist/DIST_REF_M)²` 放大。
+3. **标签数缩放**：位置 R 乘以 `computeTagFactor()`，标签数低于 `TAG_REF` 时按 `TAG_REF/tags` 放大（上限 `TAG_SCALE_MAX`）。
+4. **马氏距离门控**：更新前用 `gateVision()` 计算马氏距离，拒绝离群观测：
+
+   ```
+   S  = P(0..2, 0..2) + R_vision
+   d² = innovᵀ · S⁻¹ · innov
+   通过条件: d² <= GATE_THRESHOLD²
+   ```
+
+该逻辑封装在 `EKF5D/UKF5D.gateVision()` 与各定位器的 `adaptVisionR()` 中。
+
 ***
 
 ## 7. 可调参数列表
@@ -240,6 +262,19 @@ Vy' = Vy + ay_w·dt
 > - `AZ_THRESHOLD`、`ANGULAR_VEL_THRESHOLD` 仅 D3 使用；
 > - `ANGLE_THRESHOLD`（默认 0.15 rad ≈ 8.6°）为 D2 专用，替代上述两阈值；
 > - `JERK_THRESHOLD`、`R_PIN_BASE`、`R_PIN_THETA_BASE`、`R_BOOST_MAX`、`R_DECAY` 以及零速检测阈值为 D2/D3 共用。
+>
+> **视觉观测 R_vision 参数（所有定位器变体共用，详见 §6.4）**：
+>
+> | 参数 | 默认值 | 含义 |
+> | --- | --- | --- |
+> | `M_TO_INCH` | 39.37007874 | 米 → 英寸换算 |
+> | `STD_LOW_INCH` / `STD_HIGH_INCH` | 2.0 / 6.0 in | 视觉位置 stdDev 线性映射低/高阈值 |
+> | `STD_LOW_ANGLE` / `STD_HIGH_ANGLE` | 0.035 / 0.175 rad | 视觉航向 stdDev 线性映射低/高阈值 |
+> | `R_MAX_SCALE` | 20.0 | std→R 线性映射斜率（**不再截断上界**） |
+> | `DIST_REF_M` | 1.0 m | 距离缩放参考距离（超出后二次放大） |
+> | `TAG_REF` | 2.0 | 标签数缩放参考标签数 |
+> | `TAG_SCALE_MAX` | 4.0 | 标签过少时 R 放大上限 |
+> | `GATE_THRESHOLD` | 4.0 | 马氏距离门控阈值（无量纲） |
 
 ***
 

@@ -23,6 +23,8 @@
 | 适用场景 | 平坦场地 | 有斜坡/坡道的场地 |
 
 > 所有定位器类 (`EKFLocalizer`, `AdaptiveEKFLocalizer`, `UKFLocalizer`, `AdaptiveUKFLocalizer`) 均支持 D2/D3 模式切换。EKF 和 UKF 的 API 完全兼容，可即插即用替换。
+>
+> 5 维加速度计驱动变体（`AdaptiveEKF5DLocalizer` / `AdaptiveUKF5DLocalizer` 及其 D2 简化版 `*_D2`）见 [Theory5D.md](./Theory5D.md)。
 
 > **D3 斜坡补偿符号约定**：D3 模式的速度投影采用 pitch 前仰为正、roll 左侧抬起为正，交叉项符号为**负号**（`v_x^{horiz} = v_x^{body}·cosθ - v_y^{body}·sinθ·sinφ`）。完整推导见 [`D3Localizer/Theory.md`](../D3Localizer/Theory.md)。
 
@@ -481,27 +483,31 @@ double[] stdDevs = mt1.getStdDevs();  // {x, y, z, roll, pitch, yaw} (米, 度)
 - **x, y**: stdDev 从米 → 英寸 (×39.37)，与位置阈值比较
 - **θ (yaw)**: stdDev 从度 → 弧度，与角度专用阈值比较
 
-### 5.3 R 调整策略 (每方向独立)
+### 5.3 R 调整策略 (每方向独立，去除上界)
 
-**位置方向 (x, y)**:
+单一方向 std → R 采用**无上界的线性映射**（超过高阈值后继续线性放大，不再截断在 `R_MAX_SCALE`，9/2 改进）：
+
 ```
-std_inch = std_meter × 39.37
-
-if std_inch < STD_LOW_INCH (2.0 in):     R = 0.01          # 完全信任
-elif std_inch > STD_HIGH_INCH (6.0 in):  R = 0.01 × 20     # 高度怀疑
-else:  t = (std_inch - 2.0) / (6.0 - 2.0)                  # 线性插值
-       R = 0.01 × (1 + t × 19)
+if std <= LOW:                          R = 0.01
+else:  t = (std - LOW) / (HIGH - LOW)
+       R = 0.01 × (1 + t × (R_MAX_SCALE - 1))   # 无上界, 线性继续放大
 ```
 
-**角度方向 (θ)**:
-```
-std_rad = Math.toRadians(std_yaw_deg)    # 度 → 弧度
+- **位置方向 (x, y)**：`std_inch = std_meter × 39.37`，阈值用 `STD_LOW_INCH` / `STD_HIGH_INCH`。
+- **角度方向 (θ)**：`std_rad = Math.toRadians(std_yaw_deg)`，阈值用 `STD_LOW_ANGLE` / `STD_HIGH_ANGLE`。
 
-if std_rad < STD_LOW_ANGLE (0.035 rad):     R = 0.01        # 完全信任 (≈2°)
-elif std_rad > STD_HIGH_ANGLE (0.175 rad):  R = 0.01 × 20  # 高度怀疑 (≈10°)
-else:  t = (std_rad - 0.035) / (0.175 - 0.035)             # 线性插值
-       R = 0.01 × (1 + t × 19)
+位置方向的 R 还会额外乘以两个缩放因子，以应对远离 AprilTag / 标签过少时视觉误差急剧放大的现象（9/2 实验结论）：
+
 ```
+rX     = mapStdToR(stdX_inch)  × distFactor × tagFactor
+rY     = mapStdToR(stdY_inch)  × distFactor × tagFactor
+rTheta = mapStdToRAngle(stdYaw_rad)      # 角度不乘距离/标签因子
+```
+
+各缩放因子定义：
+
+- **距离缩放 `distFactor`**：`dist = mt1.getAvgDist()`（米），当 `dist > DIST_REF_M` 时按二次放大 `(dist / DIST_REF_M)²`，否则为 1。远离 tag 时视觉位置误差近似随距离平方增长，故用二次项。
+- **标签数缩放 `tagFactor`**：`tags = mt1.getTagCount()`，当 `tags >= TAG_REF` 时为 1；当 `0 < tags < TAG_REF` 时按 `TAG_REF / tags` 放大（上限 `TAG_SCALE_MAX`）；当 `tags <= 0` 时取 `TAG_SCALE_MAX`。标签越少位姿解算越不可靠，故放大 R。
 
 最终 `adaptR()` 返回一个 3x3 对角 `SimpleMatrix`，直接传入 `EKF/UKF.setR(SimpleMatrix)`。
 
@@ -509,11 +515,30 @@ else:  t = (std_rad - 0.035) / (0.175 - 0.035)             # 线性插值
 
 | 参数 | 推荐值 | 含义 |
 |---|---|---|
-| `STD_LOW_INCH` | 2.0 in (≈0.05m) | 位置：低于此值完全信任视觉 |
-| `STD_HIGH_INCH` | 6.0 in (≈0.15m) | 位置：高于此值高度怀疑视觉 |
+| `STD_LOW_INCH` | 2.0 in (≈0.05m) | 位置：低于此值完全信任视觉（R=0.01） |
+| `STD_HIGH_INCH` | 6.0 in (≈0.15m) | 位置：线性放大区间上边界（超出后继续线性放大） |
 | `STD_LOW_ANGLE` | 0.035 rad (≈2°) | 角度：低于此值完全信任视觉 |
-| `STD_HIGH_ANGLE` | 0.175 rad (≈10°) | 角度：高于此值高度怀疑视觉 |
-| `R_MAX_SCALE` | 20.0 | 最大 R 放大倍数 |
+| `STD_HIGH_ANGLE` | 0.175 rad (≈10°) | 角度：线性放大区间上边界 |
+| `R_MAX_SCALE` | 20.0 | std→R 线性映射斜率（**不再截断上界**） |
+| `DIST_REF_M` | 1.0 m | 距离缩放参考距离（超出后二次放大） |
+| `TAG_REF` | 2.0 | 标签数缩放参考标签数 |
+| `TAG_SCALE_MAX` | 4.0 | 标签过少时 R 的最大放大倍数 |
+| `GATE_THRESHOLD` | 4.0 | 马氏距离门控阈值（无量纲，越大越宽松） |
+
+### 5.5 马氏距离门控 (离群点拒绝)
+
+即使 R 已按距离/标签数放大，远处视觉解仍可能产生巨大误差，直接更新会把滤波器带偏。因此每次视觉更新前先用**马氏距离门控**判断该观测是否离群：
+
+```
+S  = P + R                    (观测模型 H = I → 新息协方差)
+d² = (z - x̂)ᵀ · S⁻¹ · (z - x̂)
+if d² <= GATE_THRESHOLD² :  接受更新
+else                      :  拒绝 (该帧视觉作废)
+```
+
+- 角度新息在计算前归一化到 `[-π, π]`。
+- 被拒绝的帧只跳过视觉更新，predict 照常进行，滤波器继续依赖里程计直到下一次可信观测。
+- 该门控逻辑封装在滤波器基类的 `gateVision()` 中，各定位器在 `update()` 视觉分支内先门控、通过后再 `update()`。
 
 ---
 
@@ -618,11 +643,14 @@ adaptQ(double dt)
 adaptR()
   │
   ├─ mt1.getStdDevs()  →  stdX_m, stdY_m, stdYaw_deg
-  ├─ stdX_m × 39.37 → stdX_inch → mapStdToR  → rX       (位置阈值)
-  ├─ stdY_m × 39.37 → stdY_inch → mapStdToR  → rY       (位置阈值)
-  └─ Math.toRadians(stdYaw_deg) → mapStdToRAngle → rTheta (角度阈值)
+  ├─ stdX_m × 39.37 → stdX_inch → mapStdToR  → × distFactor × tagFactor → rX
+  ├─ stdY_m × 39.37 → stdY_inch → mapStdToR  → × distFactor × tagFactor → rY
+  └─ Math.toRadians(stdYaw_deg) → mapStdToRAngle → rTheta (角度, 不缩放)
   │
   └─→ 构造 SimpleMatrix(3x3) 对角 R (in²)  →  return R
+
+视觉更新 (仅当 mt1.isValid()):
+  adaptR() → setR(R) → gateVision(x, y, θ, GATE_THRESHOLD) 通过才 update(x, y, θ, timestamp)
 
 EKF/UKF:
   setQ(SimpleMatrix Q)   — 直接接收完整 Q 矩阵

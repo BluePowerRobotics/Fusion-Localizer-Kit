@@ -83,6 +83,16 @@ public class AdaptiveEKF5DLocalizer implements Localizer {
     public static double STD_HIGH_ANGLE = 0.175;  // rad (≈10°)
     public static double R_MAX_SCALE = 20.0;
 
+    // ---- 视觉距离 / 标签缩放与门控 (9/2 改进) ----
+    /** 参考距离 (米)，超过该距离视觉位置 R 随距离二次放大 */
+    public static double DIST_REF_M = 1.0;
+    /** 参考标签数，标签数低于该值视觉位置 R 放大 */
+    public static double TAG_REF = 2.0;
+    /** 标签数过少时 R 的最大放大倍数 */
+    public static double TAG_SCALE_MAX = 4.0;
+    /** 马氏距离门控阈值 (无量纲) */
+    public static double GATE_THRESHOLD = 4.0;
+
 
     // ==================== 构造 ====================
 
@@ -164,17 +174,24 @@ public class AdaptiveEKF5DLocalizer implements Localizer {
             ekf.zeroVelocity();
         }
 
-        // ---- 8. MT1 视觉 → 自适应 R + 视觉更新 ----
+        // ---- 8. MT1 视觉 → 自适应 R + 门控 + 视觉更新 ----
         mt1.update();
         if (mt1.isValid()) {
             ekf.setVisionR(adaptVisionR());
             Pose2d visionPose = mt1.getPose();
-            ekf.updateVision(
+            if (ekf.gateVision(
                     visionPose.position.x,
                     visionPose.position.y,
                     visionPose.heading.toDouble(),
-                    mt1.getTimestamp()
-            );
+                    GATE_THRESHOLD
+            )) {
+                ekf.updateVision(
+                        visionPose.position.x,
+                        visionPose.position.y,
+                        visionPose.heading.toDouble(),
+                        mt1.getTimestamp()
+                );
+            }
         }
 
         return lastVel;
@@ -242,8 +259,12 @@ public class AdaptiveEKF5DLocalizer implements Localizer {
     private SimpleMatrix adaptVisionR() {
         double[] stdDevs = mt1.getStdDevs();  // {x, y, z, roll, pitch, yaw} (米, 度)
 
-        double rX = mapStdToR(stdDevs[0] * M_TO_INCH);
-        double rY = mapStdToR(stdDevs[1] * M_TO_INCH);
+        // 距离与标签数缩放: 远离 tag / 标签过少时视觉位置误差大, 放大位置 R
+        double distF = computeDistFactor();
+        double tagF = computeTagFactor();
+
+        double rX = mapStdToR(stdDevs[0] * M_TO_INCH) * distF * tagF;
+        double rY = mapStdToR(stdDevs[1] * M_TO_INCH) * distF * tagF;
         double rTheta = mapStdToR(Math.toRadians(stdDevs[5]), STD_LOW_ANGLE, STD_HIGH_ANGLE);
 
         SimpleMatrix R = new SimpleMatrix(3, 3);
@@ -270,12 +291,37 @@ public class AdaptiveEKF5DLocalizer implements Localizer {
     private double mapStdToR(double std, double low, double high) {
         if (std <= low) {
             return 0.01;
-        } else if (std >= high) {
-            return 0.01 * R_MAX_SCALE;
-        } else {
-            double t = (std - low) / (high - low);
-            return 0.01 * (1.0 + t * (R_MAX_SCALE - 1.0));
         }
+        // 线性增长, 超过 high 时继续线性放大, 不再截断上界 (9/2 改进)
+        double t = (std - low) / (high - low);
+        return 0.01 * (1.0 + t * (R_MAX_SCALE - 1.0));
+    }
+
+    /**
+     * 视觉位置观测噪声的距离缩放因子（远离 tag 时二次放大）。
+     */
+    private double computeDistFactor() {
+        double dist = mt1.getAvgDist();  // 米
+        if (Double.isNaN(dist) || Double.isInfinite(dist) || dist <= DIST_REF_M) {
+            return 1.0;
+        }
+        double ratio = dist / DIST_REF_M;
+        return ratio * ratio;
+    }
+
+    /**
+     * 视觉位置观测噪声的标签数缩放因子（标签过少时放大）。
+     */
+    private double computeTagFactor() {
+        int tags = mt1.getTagCount();
+        if (tags >= TAG_REF) {
+            return 1.0;
+        }
+        if (tags <= 0) {
+            return TAG_SCALE_MAX;
+        }
+        double ratio = TAG_REF / tags;
+        return Math.min(TAG_SCALE_MAX, ratio);
     }
 
     // ==================== Localizer 接口 ====================

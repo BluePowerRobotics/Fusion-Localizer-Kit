@@ -84,7 +84,7 @@ public class FusionTestOpMode extends LinearOpMode {
     private static final int MAX_HISTORY = 80;
 
     /** 开始后校准阶段的记录时长 (毫秒) */
-    private static int CALIB_DURATION_MS = 2000;
+    public static int CALIB_DURATION_MS = 2000;
 
     @Override
     public void runOpMode() throws InterruptedException {

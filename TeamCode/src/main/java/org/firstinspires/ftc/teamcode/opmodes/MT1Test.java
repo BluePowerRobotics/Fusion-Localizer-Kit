@@ -25,7 +25,7 @@ import java.util.List;
 public class MT1Test extends LinearOpMode {
 
     /** 记录时长 (毫秒) */
-    private static int RECORDING_DURATION_MS = 2000;
+    public static int RECORDING_DURATION_MS = 2000;
 
     private MT1Localizer mt1;
 

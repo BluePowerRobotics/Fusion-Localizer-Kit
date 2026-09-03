@@ -1,5 +1,6 @@
 package org.firstinspires.ftc.teamcode.processors.FusionLocalizer;
 
+import com.acmerobotics.dashboard.config.Config;
 import com.acmerobotics.roadrunner.Pose2d;
 import com.acmerobotics.roadrunner.PoseVelocity2d;
 import com.acmerobotics.roadrunner.Vector2d;
@@ -11,6 +12,7 @@ import org.firstinspires.ftc.teamcode.RoadRunner.PinpointLocalizer;
 import org.firstinspires.ftc.teamcode.processors.D3Localizer.PinpointD3Localizer;
 import org.firstinspires.ftc.teamcode.processors.VisionLocalizer.MT1Localizer;
 import org.firstinspires.ftc.teamcode.utility.filter.UKF.UKF;
+import org.ejml.simple.SimpleMatrix;
 
 /**
  * 简易 UKF 定位器 —— Pinpoint(里程计) + Limelight MegaTag1(视觉) + UKF 融合。
@@ -21,11 +23,11 @@ import org.firstinspires.ftc.teamcode.utility.filter.UKF.UKF;
  *   <li><b>D3</b>: {@link PinpointD3Localizer}，3D 斜坡补偿里程计，需要 Hub IMU</li>
  * </ul>
  *
- * <p>与 {@link AdaptiveUKFLocalizer} 的区别在于 <b>不使用自适应 Q/R</b>：
+ * <p>与 {@link AdaptiveUKFLocalizer} 的区别在于 <b>不使用自适应 Q</b>：
  * <ul>
- *   <li>Q 和 R 保持 UKF 构造时的默认值</li>
+ *   <li>Q 保持 UKF 构造时的默认值</li>
+ *   <li>视觉 R 随 stdDev / 距离 / 标签数自适应，并带马氏距离门控</li>
  *   <li>不需要 IMU 硬件 (D2 模式)</li>
- *   <li>不需要视觉 stdDev 映射</li>
  * </ul>
  *
  * <p>每帧调用 {@link #update()} 即可完成：
@@ -35,6 +37,7 @@ import org.firstinspires.ftc.teamcode.utility.filter.UKF.UKF;
  *   <li>Limelight 有效时 → UKF 更新 (固定 R)</li>
  * </ol>
  */
+@Config
 public class UKFLocalizer implements Localizer {
 
     private final UKF ukf;
@@ -52,6 +55,25 @@ public class UKFLocalizer implements Localizer {
     public static double RbasePos = 0.01;
     /** 观测噪声 — 角度 (rad²) */
     public static double RbaseAngle = 0.05;
+
+    // ---- 视觉 R 自适应 (9/2 改进: 去除上界 + 距离/标签缩放 + 门控) ----
+    /** 单位转换: 1 m = 39.3701 in */
+    public static double M_TO_INCH = 39.37007874;
+    /** stdDev 阈值 (英寸) */
+    public static double STD_LOW_INCH = 2.0;
+    public static double STD_HIGH_INCH = 6.0;
+    /** stdDev 阈值 (弧度) */
+    public static double STD_LOW_ANGLE = 0.035;
+    public static double STD_HIGH_ANGLE = 0.175;
+    public static double R_MAX_SCALE = 20.0;
+    /** 参考距离 (米)，超过该距离视觉位置 R 随距离二次放大 */
+    public static double DIST_REF_M = 1.0;
+    /** 参考标签数，标签数低于该值视觉位置 R 放大 */
+    public static double TAG_REF = 2.0;
+    /** 标签数过少时 R 的最大放大倍数 */
+    public static double TAG_SCALE_MAX = 4.0;
+    /** 马氏距离门控阈值 (无量纲) */
+    public static double GATE_THRESHOLD = 4.0;
 
     /** 最近一次里程计速度缓存 */
     private PoseVelocity2d lastVel = new PoseVelocity2d(new Vector2d(0, 0), 0);
@@ -121,19 +143,85 @@ public class UKFLocalizer implements Localizer {
         // ---- 2. UKF 预测 (使用固定 Q) ----
         ukf.predict(lastVel.linearVel.x, lastVel.linearVel.y, lastVel.angVel, now);
 
-        // ---- 3. MT1 视觉 → UKF 更新 (使用固定 R) ----
+        // ---- 3. MT1 视觉 → 自适应视觉 R + 门控 + UKF 更新 ----
         mt1.update();
         if (mt1.isValid()) {
+            ukf.setR(adaptVisionR());
             Pose2d visionPose = mt1.getPose();              // (英寸, 英寸, 弧度)
-            ukf.update(
-                    visionPose.position.x,                  // 英寸
-                    visionPose.position.y,                  // 英寸
-                    visionPose.heading.toDouble(),          // 弧度
-                    mt1.getTimestamp()
-            );
+            if (ukf.gateVision(
+                    visionPose.position.x,
+                    visionPose.position.y,
+                    visionPose.heading.toDouble(),
+                    GATE_THRESHOLD
+            )) {
+                ukf.update(
+                        visionPose.position.x,                  // 英寸
+                        visionPose.position.y,                  // 英寸
+                        visionPose.heading.toDouble(),          // 弧度
+                        mt1.getTimestamp()
+                );
+            }
         }
 
         return lastVel;
+    }
+
+    // ==================== 视觉 R 自适应 (与 AdaptiveUKFLocalizer 一致) ====================
+
+    /**
+     * 基于 MT1 stdDev + 距离 + 标签数构建 3x3 对角视觉 R 矩阵 (去除上界)。
+     */
+    private SimpleMatrix adaptVisionR() {
+        double[] stdDevs = mt1.getStdDevs();  // {x, y, z, roll, pitch, yaw} (米, 度)
+
+        double distF = computeDistFactor();
+        double tagF = computeTagFactor();
+
+        double rX = mapStdToR(stdDevs[0] * M_TO_INCH, STD_LOW_INCH, STD_HIGH_INCH) * distF * tagF;
+        double rY = mapStdToR(stdDevs[1] * M_TO_INCH, STD_LOW_INCH, STD_HIGH_INCH) * distF * tagF;
+        double rTheta = mapStdToR(Math.toRadians(stdDevs[5]), STD_LOW_ANGLE, STD_HIGH_ANGLE);
+
+        SimpleMatrix R = new SimpleMatrix(3, 3);
+        R.set(0, 0, rX);
+        R.set(1, 1, rY);
+        R.set(2, 2, rTheta);
+        return R;
+    }
+
+    private double mapStdToR(double std, double low, double high) {
+        if (std <= low) {
+            return 0.01;
+        }
+        // 线性增长, 超过 high 时继续线性放大, 不再截断上界 (9/2 改进)
+        double t = (std - low) / (high - low);
+        return 0.01 * (1.0 + t * (R_MAX_SCALE - 1.0));
+    }
+
+    /**
+     * 视觉位置观测噪声的距离缩放因子（远离 tag 时二次放大）。
+     */
+    private double computeDistFactor() {
+        double dist = mt1.getAvgDist();  // 米
+        if (Double.isNaN(dist) || Double.isInfinite(dist) || dist <= DIST_REF_M) {
+            return 1.0;
+        }
+        double ratio = dist / DIST_REF_M;
+        return ratio * ratio;
+    }
+
+    /**
+     * 视觉位置观测噪声的标签数缩放因子（标签过少时放大）。
+     */
+    private double computeTagFactor() {
+        int tags = mt1.getTagCount();
+        if (tags >= TAG_REF) {
+            return 1.0;
+        }
+        if (tags <= 0) {
+            return TAG_SCALE_MAX;
+        }
+        double ratio = TAG_REF / tags;
+        return Math.min(TAG_SCALE_MAX, ratio);
     }
 
     // ==================== Localizer 接口 ====================

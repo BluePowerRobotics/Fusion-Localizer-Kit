@@ -315,6 +315,42 @@ public class EKF5D {
         P = I.minus(K.mult(H)).mult(P);
     }
 
+    /**
+     * 视觉观测门控 —— 计算马氏距离 (Mahalanobis distance) 判断该视觉观测是否为离群点。
+     *
+     * <p>视觉观测 H = [I₃ | 0]，仅观测 x/y/θ，因此新息协方差
+     * {@code S = P(0..2, 0..2) + visionR}。远离 AprilTag 时视觉误差极大，直接用其更新
+     * 会将滤波器带偏；通过马氏距离门控拒绝离群观测。
+     *
+     * @param xMeas         视觉全局 x (英寸)
+     * @param yMeas         视觉全局 y (英寸)
+     * @param thetaMeas     视觉全局朝向 (弧度)
+     * @param gateThreshold 马氏距离门控阈值 (无量纲)
+     * @return true 表示测量可接受 (马氏距离 ≤ gateThreshold)
+     */
+    public boolean gateVision(double xMeas, double yMeas, double thetaMeas, double gateThreshold) {
+        double x = state.get(IDX_X, 0);
+        double y = state.get(IDX_Y, 0);
+        double theta = state.get(IDX_THETA, 0);
+
+        SimpleMatrix innov = new SimpleMatrix(new double[][]{
+                {xMeas - x},
+                {yMeas - y},
+                {normalizeAngle(thetaMeas - theta)}
+        });
+
+        // S = P(0..2, 0..2) + visionR
+        SimpleMatrix Psub = new SimpleMatrix(3, 3);
+        for (int r = 0; r < 3; r++) {
+            for (int c = 0; c < 3; c++) {
+                Psub.set(r, c, P.get(r, c));
+            }
+        }
+        SimpleMatrix S = Psub.plus(visionR);
+        SimpleMatrix d2 = innov.transpose().mult(safeInvert(S)).mult(innov);
+        return d2.get(0, 0) <= gateThreshold * gateThreshold;
+    }
+
     // ==================== 零速检测辅助 ====================
 
     /**
